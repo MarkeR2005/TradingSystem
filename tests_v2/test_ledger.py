@@ -90,3 +90,9 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.position('s', route).quantity, 0)
         self.assertEqual(len(self.ledger.trades('s')), 1)
         self.assertAlmostEqual(self.ledger.equity('s')[0].value, 3)
+
+    def test_close_tolerance_never_hides_an_additional_whole_lot(self) -> None:
+        self.ledger.apply('s', execution('large-buy', Side.BUY, 1e12, 100))
+        self.ledger.apply('s', execution('large-sell', Side.SELL, 1e12 + 1, 110))
+        self.assertEqual(self.ledger.position('s', ROUTE).quantity, -1)
+        self.assertEqual(self.ledger.trades('s')[0].pnl, 1e13)

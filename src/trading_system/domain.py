@@ -36,8 +36,14 @@ class OrderStatus(str, Enum):
     SUBMITTED = 'submitted'
     ACCEPTED = 'accepted'
     PARTIALLY_FILLED = 'partially_filled'
+    CANCEL_PENDING = 'cancel_pending'
+    CANCELLED = 'cancelled'
     FILLED = 'filled'
     REJECTED = 'rejected'
+
+    @property
+    def terminal(self) -> bool:
+        return self in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED)
 
 
 @dataclass(frozen=True)
@@ -70,6 +76,9 @@ class Instrument:
             return False
         nearest = round(units)
         return nearest >= 1 and isclose(units, nearest, rel_tol=0, abs_tol=1e-9)
+
+    def quantities_equal(self, left: float, right: float) -> bool:
+        return isclose(left, right, rel_tol=0, abs_tol=self.quantity_step * 1e-9)
 
 
 @dataclass(frozen=True)
@@ -111,16 +120,24 @@ class Candle:
 
 @dataclass(frozen=True)
 class OrderIntent:
-    """Market intent for iteration one; other order types follow separately."""
+    """Market intent when limit_price is None, otherwise a limit intent."""
 
     route: Route
     side: Side
     quantity: float
+    limit_price: float | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.side, Side):
             raise ValueError('side must be a Side')
         positive(self.quantity, 'quantity')
+        if self.limit_price is not None:
+            finite(self.limit_price, 'limit price')
+
+    def accepts_price(self, price: float) -> bool:
+        if self.limit_price is None:
+            return True
+        return price <= self.limit_price if self.side is Side.BUY else price >= self.limit_price
 
 
 @dataclass(frozen=True)
@@ -134,6 +151,14 @@ class OrderSnapshot:
     average_fill_price: float = 0.0
     commission: float = 0.0
     rejection_reason: str | None = None
+    cancel_request_id: str | None = None
+    cancel_rejection_reason: str | None = None
+    replaces_order_id: str | None = None
+    replacement_order_id: str | None = None
+
+    @property
+    def remaining_quantity(self) -> float:
+        return max(0.0, self.intent.quantity - self.filled_quantity)
 
 
 @dataclass(frozen=True)
@@ -195,6 +220,19 @@ class SubmitOrder:
 
 
 @dataclass(frozen=True)
+class CancelOrder:
+    strategy_id: str
+    order_id: str
+
+
+@dataclass(frozen=True)
+class ReplaceOrder:
+    strategy_id: str
+    order_id: str
+    intent: OrderIntent
+
+
+@dataclass(frozen=True)
 class GatewaySubmit:
     order: OrderSnapshot
 
@@ -203,6 +241,53 @@ class GatewaySubmit:
 class GatewayAccepted:
     order_id: str
     gateway_id: str
+
+
+@dataclass(frozen=True)
+class GatewayCancel:
+    order_id: str
+    gateway_id: str
+    request_id: str
+
+
+@dataclass(frozen=True)
+class GatewayCancelled:
+    """Final cumulative executed quantity at the gateway's cancellation barrier."""
+
+    order_id: str
+    gateway_id: str
+    request_id: str
+    filled_quantity: float
+
+    def __post_init__(self) -> None:
+        if not all((self.order_id, self.gateway_id, self.request_id)):
+            raise ValueError('cancellation identifiers must not be empty')
+        finite(self.filled_quantity, 'cancelled order filled quantity')
+        if self.filled_quantity < 0:
+            raise ValueError('cancelled order filled quantity must not be negative')
+
+
+@dataclass(frozen=True)
+class GatewayCancelRejected:
+    order_id: str
+    gateway_id: str
+    request_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not all((self.order_id, self.gateway_id, self.request_id, self.reason)):
+            raise ValueError('cancellation identifiers and reason must not be empty')
+
+
+@dataclass(frozen=True)
+class GatewayRejected:
+    order_id: str
+    gateway_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not all((self.order_id, self.gateway_id, self.reason)):
+            raise ValueError('rejection identifiers and reason must not be empty')
 
 
 @dataclass(frozen=True)
@@ -215,4 +300,8 @@ class ExecutionApplied:
     execution: Execution
 
 
-type Message = CandleReceived | SubmitOrder | GatewaySubmit | GatewayAccepted | OrderUpdated | Execution | ExecutionApplied
+type Message = (
+    CandleReceived | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
+    | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
+    | GatewayRejected | OrderUpdated | Execution | ExecutionApplied
+)

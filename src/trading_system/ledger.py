@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from math import isclose
 
 from .domain import EquityPoint, Execution, Position, Route, Trade
 
@@ -50,7 +49,7 @@ class PositionLedger:
         delta = execution.side.sign * execution.quantity
         opposite = old * delta < 0
         closing = min(abs(old), execution.quantity) if opposite else 0.0
-        if opposite and isclose(abs(old), execution.quantity, rel_tol=1e-12, abs_tol=0):
+        if opposite and execution.route.instrument.quantities_equal(abs(old), execution.quantity):
             closing = execution.quantity
             quantity = 0.0
         else:

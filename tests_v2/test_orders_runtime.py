@@ -113,6 +113,14 @@ class OrdersRuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.drain()
         self.assertEqual(self.context.orders()[0].status, OrderStatus.REJECTED)
 
+    async def test_overfill_tolerance_never_allows_an_additional_whole_lot(self) -> None:
+        order_id = await self.submit(1e12)
+        fill = replace(execution('over-large', Side.BUY, 1e12 + 1, 100), order_id=order_id)
+        await self.runtime.bus.publish('orders', fill)
+        with self.assertRaises(DeliveryError):
+            await self.runtime.drain()
+        self.assertEqual(self.context.position(ROUTE).quantity, 0)
+
     async def test_invalid_intent_is_rejected_without_filling(self) -> None:
         for route, quantity in ((ROUTE, 0.5),
                                 (replace(ROUTE, instrument=replace(INSTRUMENT, currency='USD')), 1),

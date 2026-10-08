@@ -35,7 +35,7 @@ class _StrategyRunner:
 
 
 class TradingRuntime:
-    """Iteration-one composition root using controlled simulation time."""
+    """Offline composition root using controlled simulation time."""
 
     def __init__(self, clock: ManualClock) -> None:
         self.clock = clock
@@ -76,7 +76,8 @@ class TradingRuntime:
             raise ValueError('strategy name already exists')
         runner = _StrategyRunner(strategy)
         context = StrategyContext(strategy.name, self.bus, self.clock, self.ledger, self.orders,
-                                  lambda: self._active and runner.running)
+                                  lambda: self._active and runner.running,
+                                  can_cancel=lambda: self._active)
         runner.context = context
         self._strategies[strategy.name] = runner
         self.bus.subscribe(strategy_recipient(strategy.name), runner.handle)
