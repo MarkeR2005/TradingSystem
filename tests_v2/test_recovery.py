@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from dataclasses import replace
 import sqlite3
 import subprocess
@@ -29,7 +30,7 @@ class JournalTests(TestCase):
             with DurableJournal(Path(directory)) as restored:
                 self.assertEqual(restored.records, ({'name': 'первый'}, {'name': 'second'}))
                 self.assertFalse(restored.degraded)
-            with sqlite3.connect(Path(directory) / 'events.sqlite3') as db:
+            with closing(sqlite3.connect(Path(directory) / 'events.sqlite3')) as db:
                 self.assertEqual(db.execute('SELECT COUNT(*) FROM events').fetchone()[0], 2)
 
     def test_database_failure_keeps_durable_events_and_rebuilds_projection(self):
@@ -104,11 +105,12 @@ class JournalTests(TestCase):
             with DurableJournal(Path(directory)) as journal:
                 journal.append({'fill': 1})
             path = Path(directory) / 'events.sqlite3'
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.execute("UPDATE events SET payload = '{}' WHERE sequence = 1")
+                db.commit()
             with self.assertRaises(JournalError):
                 DurableJournal(Path(directory))
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 self.assertEqual(db.execute('SELECT payload FROM events').fetchone()[0], '{}')
 
 
