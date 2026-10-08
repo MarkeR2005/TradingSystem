@@ -30,6 +30,23 @@ class SimulationGateway:
         self._orders: dict[str, OrderSnapshot] = {}
         self._cancellations: dict[str, GatewayCancel] = {}
 
+    def order_snapshots(self) -> tuple[OrderSnapshot, ...]:
+        return tuple(self._orders.values())
+
+    def restore_orders(self, observed: tuple[OrderSnapshot, ...]) -> None:
+        """Seed a controlled broker fixture, obtained independently before restart."""
+        if self._bus is not None or self._orders:
+            raise RuntimeError('restore requires an empty, unattached simulator')
+        orders = {order.order_id: order for order in observed}
+        if len(orders) != len(observed) or any(
+                o.intent.route.instrument.id.gateway_id != self.gateway_id for o in observed):
+            raise ValueError('invalid simulation snapshot')
+        self._orders = orders
+        self._cancellations = {
+            o.order_id: GatewayCancel(o.order_id, self.gateway_id, o.cancel_request_id)
+            for o in observed if o.cancel_request_id is not None and o.status is OrderStatus.CANCEL_PENDING
+        }
+
     def attach(self, bus: EventBus) -> None:
         if self._bus is not None:
             raise ValueError('gateway is already attached')
@@ -53,6 +70,11 @@ class SimulationGateway:
                     raise ValueError('another cancellation is already pending')
                 return
             self._cancellations[message.order_id] = message
+            order = self._orders[message.order_id]
+            if not order.status.terminal:
+                self._orders[message.order_id] = replace(
+                    order, status=OrderStatus.CANCEL_PENDING,
+                    cancel_request_id=message.request_id, cancel_rejection_reason=None)
             if self.auto_confirm_cancels:
                 await self.confirm_cancel(message.order_id)
         else:
@@ -77,6 +99,10 @@ class SimulationGateway:
         request = self._cancellations[order_id]
         message = GatewayCancelRejected(order_id, self.gateway_id, request.request_id, reason)
         await self._publish(message)
+        order = self._orders[order_id]
+        status = order.status if order.status.terminal else (
+            OrderStatus.PARTIALLY_FILLED if order.filled_quantity else OrderStatus.ACCEPTED)
+        self._orders[order_id] = replace(order, status=status, cancel_rejection_reason=reason)
         del self._cancellations[order_id]
         return message
 
@@ -107,8 +133,12 @@ class SimulationGateway:
         execution = Execution(uuid4().hex, order_id, order.intent.route, order.intent.side,
                               quantity, price, commission, self.clock.now())
         await self._publish(execution)
+        total = order.filled_quantity + quantity
+        average = (order.average_fill_price * order.filled_quantity + price * quantity) / total
         self._orders[order_id] = replace(
-            order, filled_quantity=order.intent.quantity if full else order.filled_quantity + quantity,
-            status=OrderStatus.FILLED if full else OrderStatus.PARTIALLY_FILLED,
+            order, average_fill_price=average, commission=order.commission + commission,
+            filled_quantity=order.intent.quantity if full else order.filled_quantity + quantity,
+            status=OrderStatus.FILLED if full else (
+                OrderStatus.CANCEL_PENDING if order_id in self._cancellations else OrderStatus.PARTIALLY_FILLED),
         )
         return execution

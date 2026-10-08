@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 from types import TracebackType
 
-from .domain import Candle, CandleReceived, ExecutionApplied, Message, OrderUpdated
+from .domain import Candle, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated
 from .events import EventBus
 from .ledger import PositionLedger
+from .persistence import DurableJournal
 from .orders import OrderManager, strategy_recipient
 from .simulation import Gateway
 from .strategy import AutoStrategy, StrategyContext
@@ -37,11 +38,11 @@ class _StrategyRunner:
 class TradingRuntime:
     """Offline composition root using controlled simulation time."""
 
-    def __init__(self, clock: ManualClock) -> None:
+    def __init__(self, clock: ManualClock, *, journal: DurableJournal | None = None) -> None:
         self.clock = clock
         self.bus = EventBus()
         self.ledger = PositionLedger()
-        self.orders = OrderManager(self.bus, clock, self.ledger)
+        self.orders = OrderManager(self.bus, clock, self.ledger, journal=journal)
         self._strategies: dict[str, _StrategyRunner] = {}
         self._active = False
         self._used = False
@@ -50,6 +51,7 @@ class TradingRuntime:
         if self._used:
             raise RuntimeError('runtime cannot be started twice')
         self._used = True
+        await self.orders.restore()
         self._active = True
         self.bus.subscribe('orders', self.orders.handle)
         return self
@@ -76,7 +78,7 @@ class TradingRuntime:
             raise ValueError('strategy name already exists')
         runner = _StrategyRunner(strategy)
         context = StrategyContext(strategy.name, self.bus, self.clock, self.ledger, self.orders,
-                                  lambda: self._active and runner.running,
+                                  lambda: self._active and runner.running and self.orders.ready,
                                   can_cancel=lambda: self._active)
         runner.context = context
         self._strategies[strategy.name] = runner
@@ -94,8 +96,14 @@ class TradingRuntime:
         await self.bus.drain()
         self.clock.advance_to(candle.closed_at)
         for name, runner in self._strategies.items():
-            if candle.instrument_id in runner.strategy.instruments:
+            if self.orders.ready and candle.instrument_id in runner.strategy.instruments:
                 await self.bus.publish(strategy_recipient(name), CandleReceived(candle))
+
+    async def reconcile_gateway(self, gateway_id: str, observed: tuple[OrderSnapshot, ...]) -> None:
+        self._check_active()
+        await self.bus.drain()
+        await self.orders.reconcile_gateway(gateway_id, observed)
+        await self.bus.drain()
 
     async def drain(self) -> None:
         await self.bus.drain()
