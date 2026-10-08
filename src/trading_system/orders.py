@@ -13,6 +13,7 @@ from .domain import (
 from . import codec
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
+from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 
 
@@ -127,6 +128,12 @@ class OrderManager:
         latest: datetime | None = None
         for record in self.journal.records:
             try:
+                if record.get('kind') == 'strategy':
+                    timestamp, _ = decode_strategy_record(record)
+                    if latest is not None and timestamp < latest:
+                        raise JournalError('journal clock is invalid')
+                    latest = timestamp
+                    continue
                 if (set(record) != {'version', 'time', 'ids', 'gateways', 'unreconciled',
                                     'storage_blocked', 'message'} or record['version'] != 1
                         or not isinstance(record['storage_blocked'], bool)):
