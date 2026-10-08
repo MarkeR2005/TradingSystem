@@ -2,3 +2,9 @@
 */__pycache/
 .pytest_cache/
 data/
+.venv*/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+.package-check/
