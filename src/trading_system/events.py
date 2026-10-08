@@ -75,8 +75,12 @@ class EventBus:
             self._failures.clear()
             raise DeliveryError(failures)
 
+    @property
+    def in_consumer(self) -> bool:
+        return any(asyncio.current_task() is mailbox.task for mailbox in self._mailboxes.values())
+
     def _check_not_consumer(self) -> None:
-        if any(asyncio.current_task() is m.task for m in self._mailboxes.values()):
+        if self.in_consumer:
             raise RuntimeError('a consumer cannot wait for its own mailbox')
 
     async def unsubscribe(self, recipient: str) -> None:

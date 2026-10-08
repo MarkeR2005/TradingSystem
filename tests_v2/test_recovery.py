@@ -328,12 +328,13 @@ class RecoveryTests(IsolatedAsyncioTestCase):
                 async with TradingRuntime(ManualClock(START), journal=journal) as restored:
                     restored.add_gateway(SimulationGateway('sim', restored.clock))
                     context = await restored.start_strategy(PassiveStrategy())
+                    before_conflict = journal.records
                     await restored.bus.publish('orders', replace(fill, commission=2))
                     with self.assertRaises(DeliveryError):
                         await restored.drain()
                     self.assertEqual(context.position(ROUTE).quantity, 1)
                     self.assertEqual(context.orders()[0].commission, 1)
-                    self.assertEqual(len(journal.records), 3)
+                    self.assertEqual(journal.records, before_conflict)
 
     async def test_pending_cancel_can_be_abandoned_before_reconciliation_without_new_order(self):
         with TemporaryDirectory() as directory:
