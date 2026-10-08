@@ -1,5 +1,6 @@
 """Single owner of per-strategy positions, completed cycles and closed equity."""
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -21,6 +22,16 @@ class PositionLedger:
         self.report_currency = report_currency
         self._accounts: dict[str, _Account] = {}
         self._executions: dict[tuple[str, str], tuple[str, Execution]] = {}
+
+    def fork(self) -> 'PositionLedger':
+        """Isolated candidate for a durable order transition."""
+        return deepcopy(self)
+
+    def adopt(self, candidate: 'PositionLedger') -> None:
+        if candidate.report_currency != self.report_currency:
+            raise ValueError('ledger currencies differ')
+        self._accounts = candidate._accounts
+        self._executions = candidate._executions
 
     def position(self, strategy_id: str, route: Route) -> Position:
         account = self._accounts.get(strategy_id)

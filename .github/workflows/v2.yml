@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2]
+    branches: [main, rewrite/v2, rewrite/v2-orders]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -39,3 +39,5 @@ jobs:
         run: python examples/v2_round_trip.py
       - name: Cancel and replace demonstration
         run: python examples/v2_cancel_replace.py
+      - name: Recovery demonstration
+        run: python examples/v2_recovery.py

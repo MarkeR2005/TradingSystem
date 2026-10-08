@@ -300,8 +300,16 @@ class ExecutionApplied:
     execution: Execution
 
 
+@dataclass(frozen=True)
+class GatewayReconciled:
+    """Internal command after validating an independent gateway snapshot."""
+
+    gateway_id: str
+    observed: tuple[OrderSnapshot, ...]
+
+
 type Message = (
     CandleReceived | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
-    | GatewayRejected | OrderUpdated | Execution | ExecutionApplied
+    | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied
 )
