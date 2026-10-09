@@ -1,5 +1,6 @@
 """Controlled executions and cancellation reports, not an OHLC backtester."""
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Protocol
 from uuid import uuid4
@@ -22,7 +23,9 @@ class Gateway(Protocol):
 
 
 class SimulationGateway:
-    def __init__(self, gateway_id: str, clock: Clock, *, auto_confirm_cancels: bool = True) -> None:
+    def __init__(self, gateway_id: str, clock: Clock, *, auto_confirm_cancels: bool = True,
+                 id_factory: Callable[[], str] = lambda: uuid4().hex) -> None:
+        self._id_factory = id_factory
         self.gateway_id = gateway_id
         self.clock = clock
         self.auto_confirm_cancels = auto_confirm_cancels
@@ -130,7 +133,7 @@ class SimulationGateway:
         full = instrument.quantities_equal(quantity, remaining)
         if quantity > remaining and not full:
             raise ValueError('fill exceeds remaining quantity')
-        execution = Execution(uuid4().hex, order_id, order.intent.route, order.intent.side,
+        execution = Execution(self._id_factory(), order_id, order.intent.route, order.intent.side,
                               quantity, price, commission, self.clock.now())
         await self._publish(execution)
         total = order.filled_quantity + quantity
