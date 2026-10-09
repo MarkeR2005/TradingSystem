@@ -101,8 +101,11 @@ class Candle:
     low: float
     close: float
     volume: float
+    synthetic: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.synthetic, bool):
+            raise ValueError('synthetic must be a bool')
         object.__setattr__(self, 'opened_at', utc(self.opened_at))
         if self.timeframe <= timedelta(0):
             raise ValueError('timeframe must be positive')
@@ -214,6 +217,12 @@ class CandleReceived:
 
 
 @dataclass(frozen=True)
+class CandleCorrected:
+    previous: Candle
+    candle: Candle
+
+
+@dataclass(frozen=True)
 class SubmitOrder:
     strategy_id: str
     intent: OrderIntent
@@ -309,7 +318,7 @@ class GatewayReconciled:
 
 
 type Message = (
-    CandleReceived | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
+    CandleReceived | CandleCorrected | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
     | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied
 )

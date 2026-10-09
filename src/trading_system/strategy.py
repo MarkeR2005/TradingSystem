@@ -19,7 +19,8 @@ class StrategyContext:
                  ledger: PositionLedger, orders: OrderManager, can_trade: Callable[[], bool],
                  can_cancel: Callable[[], bool] | None = None, *,
                  get_status: Callable[[], StrategyStatus] | None = None,
-                 begin_optimization: Callable[[HistoryRequest, OptimizationFunction], Awaitable[OptimizationHandle]] | None = None) -> None:
+                 begin_optimization: Callable[[HistoryRequest, OptimizationFunction], Awaitable[OptimizationHandle]] | None = None,
+                 load_history: Callable[[HistoryRequest], Awaitable[tuple[Candle, ...]]] | None = None) -> None:
         self.strategy_id = strategy_id
         self.clock = clock
         self._bus = bus
@@ -28,6 +29,7 @@ class StrategyContext:
         self._can_trade = can_trade
         self._get_status = get_status
         self._begin_optimization = begin_optimization
+        self._load_history = load_history
         self._can_cancel = can_cancel if can_cancel is not None else can_trade
 
     @property
@@ -39,6 +41,11 @@ class StrategyContext:
         if self._begin_optimization is None:
             raise RuntimeError('optimization service is not configured')
         return await self._begin_optimization(request, worker)
+
+    async def load_history(self, request: HistoryRequest) -> tuple[Candle, ...]:
+        if self._load_history is None:
+            raise RuntimeError('history service is not configured')
+        return await self._load_history(request)
 
     async def place_order(self, intent: OrderIntent) -> None:
         if not self._can_trade():
@@ -96,6 +103,14 @@ class AutoStrategy(ABC):
 
     async def on_restore(self, context: StrategyContext) -> None:
         """Rebuild derived objects; trading stays disabled during this callback."""
+        pass
+
+    def accepts_candle(self, candle: Candle) -> bool:
+        """Override to filter timeframes; instrument membership remains mandatory."""
+        return candle.instrument_id in self.instruments
+
+    async def on_correction(self, context: StrategyContext, previous: Candle, corrected: Candle) -> None:
+        """Rebuild derived data separately from the normal trading signal callback."""
         pass
 
     @abstractmethod

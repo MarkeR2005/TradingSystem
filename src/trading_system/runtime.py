@@ -1,10 +1,13 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import replace
 from types import TracebackType
+from uuid import uuid4
 
-from .domain import Candle, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated
+from .domain import Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated
 from .events import EventBus
 from .ledger import PositionLedger
+from .market_data import CandleBook
 from .lifecycle import LifecycleStore, StrategySnapshot, StrategyStatus
 from .optimization import (
     HistoryRequest, HistorySource, OptimizationError, OptimizationFunction,
@@ -76,10 +79,15 @@ class _StrategyRunner:
         async with self.lock:
             self.callback_task = asyncio.current_task()
             try:
-                if isinstance(message, CandleReceived):
+                if isinstance(message, (CandleReceived, CandleCorrected)):
                     if self.status is not StrategyStatus.RUNNING or not self.runtime.orders.ready:
                         return
-                    await self.strategy.on_candle(self.context, message.candle)
+                    if not self.strategy.accepts_candle(message.candle):
+                        return
+                    if isinstance(message, CandleCorrected):
+                        await self.strategy.on_correction(self.context, message.previous, message.candle)
+                    else:
+                        await self.strategy.on_candle(self.context, message.candle)
                 elif isinstance(message, ExecutionApplied):
                     await self.strategy.on_fill(self.context, message.execution)
                 elif isinstance(message, OrderUpdated):
@@ -120,13 +128,17 @@ class TradingRuntime:
     """Offline composition root; finance, lifecycle and CPU jobs have separate owners."""
 
     def __init__(self, clock: ManualClock, *, journal: DurableJournal | None = None,
-                 history: HistorySource | None = None, optimizer: Optimizer | None = None) -> None:
+                 history: HistorySource | None = None, optimizer: Optimizer | None = None,
+                 order_id_factory: Callable[[], str] = lambda: uuid4().hex,
+                 optimization_enabled: bool = True) -> None:
         self.clock = clock
         self.bus = EventBus()
         self.ledger = PositionLedger()
-        self.orders = OrderManager(self.bus, clock, self.ledger, journal=journal)
+        self.orders = OrderManager(self.bus, clock, self.ledger, journal=journal, id_factory=order_id_factory)
         self.lifecycle = LifecycleStore(journal)
-        self.history = history
+        self.market = CandleBook(clock)
+        self.history: HistorySource = history if history is not None else self.market
+        self._optimization_enabled = optimization_enabled
         self.optimizer = optimizer if optimizer is not None else ProcessOptimizer()
         self._strategies: dict[str, _StrategyRunner] = {}
         self._optimization_tasks: set[asyncio.Task[JsonObject]] = set()
@@ -185,6 +197,7 @@ class TradingRuntime:
             lambda: self._active and runner.status is StrategyStatus.RUNNING and self.orders.ready,
             can_cancel=lambda: self._active, get_status=lambda: runner.status,
             begin_optimization=lambda request, worker: self._begin_optimization(runner, request, worker),
+            load_history=self._load_history,
         )
         runner.context = context
         initial = StrategyStatus.RUNNING if saved is None else (
@@ -232,7 +245,9 @@ class TradingRuntime:
     async def _begin_optimization(self, runner: _StrategyRunner, request: HistoryRequest,
                                   worker: OptimizationFunction) -> OptimizationHandle:
         self._check_active()
-        if self._closing or self.history is None:
+        if not self._optimization_enabled:
+            raise RuntimeError('optimization is disabled for this runtime')
+        if self._closing:
             raise RuntimeError('history source is unavailable or runtime is closing')
         validate_worker(worker)
         if request.end > self.clock.now():
@@ -268,9 +283,7 @@ class TradingRuntime:
     async def _optimize(self, runner: _StrategyRunner, request: HistoryRequest,
                         worker: OptimizationFunction, data: OptimizationInput) -> JsonObject:
         try:
-            if self.history is None:
-                raise RuntimeError('history source is unavailable')
-            history = validate_history(request, await self.history.load(request))
+            history = await self._load_history(request)
             result = json_object(await self.optimizer.run(worker, replace(data, history=history)))
             async with runner.lock:
                 if runner.status is not StrategyStatus.OPTIMIZING or runner.job is not asyncio.current_task():
@@ -297,14 +310,25 @@ class TradingRuntime:
                     runner.fail(error)
             raise OptimizationError(str(error)) from error
 
+    async def _load_history(self, request: HistoryRequest) -> tuple[Candle, ...]:
+        self._check_active()
+        if request.end > self.clock.now():
+            raise ValueError('history cannot include future data')
+        return validate_history(request, await self.history.load(request))
+
     async def feed_candle(self, candle: Candle) -> None:
         self._check_active()
         await self.bus.drain()
-        self.clock.advance_to(candle.closed_at)
+        self.market.validate(candle, as_of=max(self.clock.now(), candle.closed_at))
+        if self.market.get(candle) is None:
+            self.clock.advance_to(candle.closed_at)
+        event = self.market.put(candle)
+        if event is None:
+            return
         for name, runner in self._strategies.items():
             if (self.orders.ready and runner.status is StrategyStatus.RUNNING
                     and candle.instrument_id in runner.strategy.instruments):
-                await self.bus.publish(strategy_recipient(name), CandleReceived(candle))
+                await self.bus.publish(strategy_recipient(name), event)
 
     async def reconcile_gateway(self, gateway_id: str, observed: tuple[OrderSnapshot, ...]) -> None:
         self._check_active()
