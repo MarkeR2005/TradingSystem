@@ -150,6 +150,10 @@ class DurableJournal:
             self._disconnect()
             self.degraded = True
             return False
+        except JournalError:
+            self._disconnect()
+            self._failed = True
+            raise
         self.degraded = False
         return True
 

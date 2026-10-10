@@ -5,7 +5,7 @@ from types import TracebackType
 from uuid import uuid4
 
 from .domain import Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated
-from .events import EventBus
+from .events import EventBus, deliver_pending_cancellation
 from .ledger import PositionLedger
 from .market_data import CandleBook
 from .lifecycle import LifecycleStore, StrategySnapshot, StrategyStatus
@@ -94,7 +94,12 @@ class _StrategyRunner:
                     await self.strategy.on_order(self.context, message.order)
                 else:
                     raise ValueError('unexpected strategy message')
+                await deliver_pending_cancellation()
                 self.checkpoint_current()
+            except asyncio.CancelledError as error:
+                failure = RuntimeError('strategy callback was cancelled')
+                self.fail(failure)
+                raise failure from error
             except Exception as error:
                 self.fail(error)
                 raise
@@ -111,12 +116,17 @@ class _StrategyRunner:
                     await self.strategy.on_start(self.context)
                 else:
                     await self.strategy.on_restore(self.context)
+                    await deliver_pending_cancellation()
                     if self.status is StrategyStatus.PAUSED and self.job is None:
                         preferred = StrategyStatus.PAUSED if saved.status is StrategyStatus.OPTIMIZING else saved.status
                         reason = 'optimization interrupted by restart' if saved.status is StrategyStatus.OPTIMIZING else saved.reason
                         self.checkpoint(preferred, reason)
                         return
+                await deliver_pending_cancellation()
                 self.checkpoint_current()
+            except asyncio.CancelledError:
+                self.fail(RuntimeError('strategy initialization was cancelled'))
+                raise
             except Exception as error:
                 self.fail(error)
                 raise

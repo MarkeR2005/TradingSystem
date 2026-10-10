@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -45,3 +45,5 @@ jobs:
         run: python examples/v2_optimization.py
       - name: Historical backtest demonstration
         run: python examples/v2_backtest.py
+      - name: Capital planning demonstration
+        run: python examples/v2_capital.py

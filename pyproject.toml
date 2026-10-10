@@ -20,4 +20,4 @@ python_version = "3.12"
 strict = true
 explicit_package_bases = true
 mypy_path = "src"
-files = ["src/trading_system", "examples/v2_round_trip.py", "examples/v2_cancel_replace.py", "examples/v2_recovery.py", "examples/v2_optimization.py", "examples/v2_backtest.py"]
+files = ["src/trading_system", "examples/v2_round_trip.py", "examples/v2_cancel_replace.py", "examples/v2_recovery.py", "examples/v2_optimization.py", "examples/v2_backtest.py", "examples/v2_capital.py"]

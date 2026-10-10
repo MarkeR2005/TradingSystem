@@ -10,6 +10,13 @@ from .domain import Message
 type Handler = Callable[[Message], Awaitable[None]]
 
 
+async def deliver_pending_cancellation() -> None:
+    """Surface self-cancellation before leaving the protected callback boundary."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        await asyncio.sleep(0)
+
+
 @dataclass(frozen=True)
 class HandlerFailure:
     recipient: str
@@ -59,9 +66,22 @@ class EventBus:
             message = await queue.get()
             try:
                 await handler(message)
+                await deliver_pending_cancellation()
+            except asyncio.CancelledError as error:
+                if self._closed:
+                    raise
+                failure = RuntimeError('handler was cancelled')
+                failure.__cause__ = error
+                self._failures.append(HandlerFailure(recipient, message, failure))
             except Exception as error:
                 self._failures.append(HandlerFailure(recipient, message, error))
             finally:
+                # Only the bus owns worker shutdown. A callback may cancel itself
+                # or await an independently cancelled task without losing its queue.
+                task = asyncio.current_task()
+                if not self._closed and task is not None:
+                    while task.cancelling():
+                        task.uncancel()
                 queue.task_done()
                 self._pending -= 1
                 if self._pending == 0:
