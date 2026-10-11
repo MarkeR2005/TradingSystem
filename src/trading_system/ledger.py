@@ -37,6 +37,11 @@ class PositionLedger:
         account = self._accounts.get(strategy_id)
         return account.positions.get(route, Position(route)) if account else Position(route)
 
+    def positions(self) -> tuple[tuple[str, Position], ...]:
+        """Immutable financial snapshot, including owners without route grants."""
+        return tuple((owner, position) for owner, account in self._accounts.items()
+                     for position in account.positions.values() if position.quantity != 0)
+
     def trades(self, strategy_id: str) -> tuple[Trade, ...]:
         account = self._accounts.get(strategy_id)
         return tuple(account.trades) if account else ()
