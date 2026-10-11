@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 from math import isclose, isfinite
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .plans import PlanCommand
 
 
 def utc(value: datetime) -> datetime:
@@ -333,8 +337,19 @@ class GatewayReconciled:
     observed: tuple[OrderSnapshot, ...]
 
 
+@dataclass(frozen=True)
+class PlanUpdated:
+    plan_id: str
+    strategy_id: str
+    phase: str
+    paused: bool
+    alert_count: int
+    reason: str | None
+
+
 type Message = (
     CandleReceived | CandleCorrected | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
     | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied | PositionChanged
+    | PlanCommand | PlanUpdated
 )

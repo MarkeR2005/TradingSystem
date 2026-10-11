@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 
 from .domain import (
     Candle, CancelOrder, EquityPoint, Execution, InstrumentId, OrderIntent,
-    OrderSnapshot, OwnershipSettlement, Position, PositionChanged, ReplaceOrder, Route, SubmitOrder, Trade,
+    OrderSnapshot, OwnershipSettlement, PlanUpdated, Position, PositionChanged, ReplaceOrder, Route, SubmitOrder, Trade,
 )
 from .events import EventBus
 from .ledger import PositionLedger
@@ -12,6 +12,7 @@ from .optimization import HistoryRequest, OptimizationFunction, OptimizationHand
 from .state import JsonObject, json_object
 from .orders import OrderManager
 from .time import Clock
+from .plans import ClosePlan, PlanSnapshot, SubmitPlan, TradePlan
 
 
 class StrategyContext:
@@ -19,6 +20,7 @@ class StrategyContext:
                  ledger: PositionLedger, orders: OrderManager, can_trade: Callable[[], bool],
                  can_cancel: Callable[[], bool] | None = None, *,
                  get_status: Callable[[], StrategyStatus] | None = None,
+                 instruments: tuple[InstrumentId, ...] = (),
                  begin_optimization: Callable[[HistoryRequest, OptimizationFunction], Awaitable[OptimizationHandle]] | None = None,
                  load_history: Callable[[HistoryRequest], Awaitable[tuple[Candle, ...]]] | None = None) -> None:
         self.strategy_id = strategy_id
@@ -28,6 +30,7 @@ class StrategyContext:
         self._orders = orders
         self._can_trade = can_trade
         self._get_status = get_status
+        self._instruments = instruments
         self._begin_optimization = begin_optimization
         self._load_history = load_history
         self._can_cancel = can_cancel if can_cancel is not None else can_trade
@@ -47,8 +50,27 @@ class StrategyContext:
             raise RuntimeError('history service is not configured')
         return await self._load_history(request)
 
-    async def place_order(self, intent: OrderIntent) -> None:
+    async def place_plan(self, plan: TradePlan) -> None:
         if not self._can_trade():
+            raise RuntimeError('strategy is not running')
+        if plan.strategy_id != self.strategy_id or any(
+                leg.intent.route.instrument.id not in self._instruments for leg in plan.legs):
+            raise ValueError('plan must belong to this strategy and its declared instruments')
+        await self._bus.publish('orders', SubmitPlan(plan))
+
+    async def close_plan(self, plan_id: str) -> None:
+        if not self._can_cancel():
+            raise RuntimeError('runtime is not active')
+        await self._bus.publish('orders', ClosePlan(self.strategy_id, plan_id))
+
+    def plan(self, plan_id: str) -> PlanSnapshot:
+        result = self._orders.plan(plan_id)
+        if result.plan.strategy_id != self.strategy_id:
+            raise ValueError('strategy does not own plan')
+        return result
+
+    async def place_order(self, intent: OrderIntent) -> None:
+        if not self._can_trade() or self._orders.has_active_plan(self.strategy_id):
             raise RuntimeError('strategy is not running')
         await self._bus.publish('orders', SubmitOrder(self.strategy_id, intent))
 
@@ -59,8 +81,8 @@ class StrategyContext:
 
     async def replace_order(self, order_id: str, intent: OrderIntent) -> None:
         """Cancel first; intent.quantity is the target total for the old order."""
-        if not self._can_trade():
-            raise RuntimeError('strategy is not running')
+        if not self._can_trade() or self._orders.has_active_plan(self.strategy_id):
+            raise RuntimeError('strategy is not running or has an active plan')
         await self._bus.publish('orders', ReplaceOrder(self.strategy_id, order_id, intent))
 
     def position(self, route: Route) -> Position:
@@ -130,4 +152,8 @@ class AutoStrategy(ABC):
 
     async def on_position_change(self, context: StrategyContext, change: PositionChanged) -> None:
         """Rebuild position-derived state after ownership changes, including while paused."""
+        pass
+
+    async def on_plan(self, context: StrategyContext, update: PlanUpdated) -> None:
+        """Progress and durable alerts; plan execution does not depend on this callback."""
         pass

@@ -5,7 +5,7 @@ from dataclasses import replace
 from types import TracebackType
 from uuid import uuid4
 
-from .domain import CancelOrder, PositionChanged, Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
+from .domain import CancelOrder, PlanUpdated, PositionChanged, Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
 from .events import EventBus, deliver_pending_cancellation
 from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryReport, TransferPosition
@@ -25,6 +25,7 @@ from .state import JsonObject, json_object
 from .simulation import Gateway
 from .strategy import AutoStrategy, StrategyContext
 from .time import ManualClock
+from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan
 
 
 class _StrategyRunner:
@@ -78,12 +79,20 @@ class _StrategyRunner:
                 error.add_note(f'failed to persist failure status: {fallback_error}')
             error.add_note(f'failed computation checkpoint: {checkpoint_error}')
 
+    def apply_plan_pause(self) -> None:
+        if self.runtime.orders.strategy_paused(self.strategy.name) and self.status is not StrategyStatus.FAILED:
+            if self.job is not None and not self.job.done():
+                self.job.cancel()
+            if self.status is not StrategyStatus.PAUSED:
+                self.transition(StrategyStatus.PAUSED, 'plan alert requires operator acknowledgement')
+
     async def handle(self, message: Message) -> None:
         if self.context is None:
             raise RuntimeError('strategy has no context')
         async with self.lock:
             self.callback_task = asyncio.current_task()
             try:
+                self.apply_plan_pause()
                 if isinstance(message, (CandleReceived, CandleCorrected)):
                     if self.status is not StrategyStatus.RUNNING or not self.runtime.orders.ready:
                         return
@@ -95,6 +104,8 @@ class _StrategyRunner:
                         await self.strategy.on_candle(self.context, message.candle)
                 elif isinstance(message, ExecutionApplied):
                     await self.strategy.on_fill(self.context, message.execution)
+                elif isinstance(message, PlanUpdated):
+                    await self.strategy.on_plan(self.context, message)
                 elif isinstance(message, PositionChanged):
                     await self.strategy.on_position_change(self.context, message)
                 elif isinstance(message, OrderUpdated):
@@ -119,13 +130,15 @@ class _StrategyRunner:
         async with self.lock:
             self.callback_task = asyncio.current_task()
             try:
+                self.apply_plan_pause()
                 if saved is None:
                     await self.strategy.on_start(self.context)
                 else:
                     await self.strategy.on_restore(self.context)
                     await deliver_pending_cancellation()
                     if self.status is StrategyStatus.PAUSED and self.job is None:
-                        preferred = StrategyStatus.PAUSED if saved.status is StrategyStatus.OPTIMIZING else saved.status
+                        preferred = StrategyStatus.PAUSED if (saved.status is StrategyStatus.OPTIMIZING
+                                                                 or self.runtime.orders.strategy_paused(self.strategy.name)) else saved.status
                         reason = 'optimization interrupted by restart' if saved.status is StrategyStatus.OPTIMIZING else saved.reason
                         self.checkpoint(preferred, reason)
                         return
@@ -215,10 +228,11 @@ class TradingRuntime:
         runner = _StrategyRunner(strategy, self)
         context = StrategyContext(
             strategy.name, self.bus, self.clock, self.ledger, self.orders,
-            lambda: self._active and runner.status is StrategyStatus.RUNNING and self.orders.ready,
+            lambda: self._active and runner.status is StrategyStatus.RUNNING and self.orders.ready
+                    and not self.orders.strategy_paused(strategy.name),
             can_cancel=lambda: self._active, get_status=lambda: runner.status,
             begin_optimization=lambda request, worker: self._begin_optimization(runner, request, worker),
-            load_history=self._load_history,
+            load_history=self._load_history, instruments=strategy.instruments,
         )
         runner.context = context
         initial = StrategyStatus.RUNNING if saved is None else (
@@ -284,6 +298,28 @@ class TradingRuntime:
         await self.orders.handle(CancelOrder(MANUAL, order_id))
         await self.bus.drain()
 
+    async def _plan_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan | AcknowledgePlan) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        await self.orders.handle(command)
+        await self.bus.drain()
+
+    async def close_plan(self, plan_id: str) -> None:
+        await self._plan_operator(ClosePlan(self.orders.plan(plan_id).plan.strategy_id, plan_id))
+
+    async def mark_plan(self, marks: PlanMarks) -> None:
+        await self._plan_operator(marks)
+
+    async def check_plan_deadlines(self) -> None:
+        await self._plan_operator(CheckPlanDeadlines())
+
+    async def retry_plan(self, command: RetryPlan) -> None:
+        await self._plan_operator(command)
+
+    async def acknowledge_plan(self, command: AcknowledgePlan) -> None:
+        await self._plan_operator(command)
+
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         self._check_operator_call()
         await self.bus.drain()
@@ -318,6 +354,8 @@ class TradingRuntime:
         async with runner.lock:
             if runner.status is StrategyStatus.OPTIMIZING:
                 raise RuntimeError('optimization is still running')
+            if self.orders.strategy_paused(name):
+                raise RuntimeError('resolve and acknowledge plan alerts before resuming')
             if not self.orders.ready:
                 raise RuntimeError('storage and gateway reconciliation are not ready')
             runner.transition(StrategyStatus.RUNNING)
@@ -340,6 +378,8 @@ class TradingRuntime:
             raise ValueError('optimization history cannot include future data')
 
         def begin() -> OptimizationHandle:
+            if self.orders.strategy_paused(runner.strategy.name):
+                raise RuntimeError('resolve plan alerts before starting optimization')
             if runner.status not in (StrategyStatus.RUNNING, StrategyStatus.PAUSED):
                 raise RuntimeError('strategy cannot start another optimization')
             try:
