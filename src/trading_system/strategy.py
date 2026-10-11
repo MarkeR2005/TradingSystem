@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 
 from .domain import (
     Candle, CancelOrder, EquityPoint, Execution, InstrumentId, OrderIntent,
-    OrderSnapshot, Position, ReplaceOrder, Route, SubmitOrder, Trade,
+    OrderSnapshot, OwnershipSettlement, Position, PositionChanged, ReplaceOrder, Route, SubmitOrder, Trade,
 )
 from .events import EventBus
 from .ledger import PositionLedger
@@ -72,6 +72,9 @@ class StrategyContext:
     def trades(self) -> tuple[Trade, ...]:
         return self._ledger.trades(self.strategy_id)
 
+    def settlements(self) -> tuple[OwnershipSettlement, ...]:
+        return self._ledger.settlements(self.strategy_id)
+
     def equity(self) -> tuple[EquityPoint, ...]:
         return self._ledger.equity(self.strategy_id)
 
@@ -123,4 +126,8 @@ class AutoStrategy(ABC):
         pass
 
     async def on_order(self, context: StrategyContext, order: OrderSnapshot) -> None:
+        pass
+
+    async def on_position_change(self, context: StrategyContext, change: PositionChanged) -> None:
+        """Rebuild position-derived state after ownership changes, including while paused."""
         pass

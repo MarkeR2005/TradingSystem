@@ -206,6 +206,22 @@ class Trade:
 
 
 @dataclass(frozen=True)
+class OwnershipSettlement:
+    """Accrued P&L of a cycle affected by ownership changes, not a round-trip trade."""
+
+    opened_at: datetime
+    closed_at: datetime
+    pnl: float
+
+
+@dataclass(frozen=True)
+class PositionChanged:
+    operation_id: str
+    previous: Position
+    position: Position
+
+
+@dataclass(frozen=True)
 class EquityPoint:
     timestamp: datetime
     value: float
@@ -320,5 +336,5 @@ class GatewayReconciled:
 type Message = (
     CandleReceived | CandleCorrected | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
-    | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied
+    | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied | PositionChanged
 )

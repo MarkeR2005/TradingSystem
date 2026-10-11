@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -51,3 +51,5 @@ jobs:
         run: python examples/v2_reservations.py
       - name: Capital source and rebalance demonstration
         run: python examples/v2_rebalance.py
+      - name: Manual inventory and transfer demonstration
+        run: python examples/v2_manual.py

@@ -1,12 +1,14 @@
 import asyncio
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from types import TracebackType
 from uuid import uuid4
 
-from .domain import Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
+from .domain import CancelOrder, PositionChanged, Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
 from .events import EventBus, deliver_pending_cancellation
 from .ledger import PositionLedger
+from .inventory import MANUAL, CloseManual, InventoryReport, TransferPosition
 from .market_data import CandleBook
 from .lifecycle import LifecycleStore, StrategySnapshot, StrategyStatus
 from .optimization import (
@@ -93,6 +95,8 @@ class _StrategyRunner:
                         await self.strategy.on_candle(self.context, message.candle)
                 elif isinstance(message, ExecutionApplied):
                     await self.strategy.on_fill(self.context, message.execution)
+                elif isinstance(message, PositionChanged):
+                    await self.strategy.on_position_change(self.context, message)
                 elif isinstance(message, OrderUpdated):
                     await self.strategy.on_order(self.context, message.order)
                 else:
@@ -168,6 +172,7 @@ class TradingRuntime:
         await self.orders.restore()
         self._active = True
         self.bus.subscribe('orders', self.orders.handle)
+        self.bus.subscribe(strategy_recipient(MANUAL), self._manual_event)
         return self
 
     async def __aexit__(self, exc_type: type[BaseException] | None,
@@ -195,6 +200,8 @@ class TradingRuntime:
 
     async def start_strategy(self, strategy: AutoStrategy) -> StrategyContext:
         self._check_active()
+        if strategy.name == MANUAL:
+            raise ValueError('manual is a reserved system owner')
         if strategy.name in self._strategies:
             raise ValueError('strategy name already exists')
         saved = self.lifecycle.get(strategy.name)
@@ -232,6 +239,50 @@ class TradingRuntime:
             raise RuntimeError('runtime is closing')
         if self._in_callback():
             raise RuntimeError('operator lifecycle commands must run outside callbacks')
+
+    async def _manual_event(self, message: Message) -> None:
+        if not isinstance(message, (OrderUpdated, ExecutionApplied, PositionChanged)):
+            raise ValueError('unexpected manual inventory event')
+        # Durable finance is already in OMS/ledger. This system owner neither
+        # receives market callbacks nor originates trading decisions.
+
+    async def reconcile_inventory(self, report: InventoryReport) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        await self.orders.handle(report)
+        await self.bus.drain()
+
+    async def transfer_position(self, command: TransferPosition) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        async with AsyncExitStack() as locks:
+            for name in sorted({command.source_id, command.target_id} - {MANUAL}):
+                runner = self._strategies.get(name)
+                if runner is None or command.route.instrument.id not in runner.strategy.instruments:
+                    raise ValueError('transfer owner must be loaded and declare the instrument')
+                await locks.enter_async_context(runner.lock)
+                if (runner.status not in (StrategyStatus.PAUSED, StrategyStatus.FAILED)
+                        or (runner.job is not None and not runner.job.done())):
+                    raise RuntimeError('pause affected strategies and finish optimization before transfer')
+            self._check_operator_call()
+            await self.orders.handle(command)
+        await self.bus.drain()
+
+    async def close_manual(self, command: CloseManual) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        await self.orders.handle(command)
+        await self.bus.drain()
+
+    async def cancel_manual(self, order_id: str) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        await self.orders.handle(CancelOrder(MANUAL, order_id))
+        await self.bus.drain()
 
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         self._check_operator_call()
