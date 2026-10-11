@@ -11,6 +11,8 @@ from .domain import (
     OrderSnapshot, OrderStatus, ReplaceOrder, Route, Side, SubmitOrder,
 )
 from .persistence import JournalError
+from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy,
+                    PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan)
 from .inventory import BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition
 from .capital import AccountCapital, AccountKey
 from .admission import (
@@ -19,6 +21,7 @@ from .admission import (
 from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
 
 _TYPES = {cls.__name__: cls for cls in (
+    AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan,
     BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition,
     AccountCapital, AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital,
     AccountKey, AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
@@ -58,7 +61,7 @@ def decode(value: Any) -> Any:
         if set(value) == {'tuple'}:
             return tuple(decode(item) for item in value['tuple'])
         if set(value) == {'enum', 'value'}:
-            enum = {'Side': Side, 'OrderStatus': OrderStatus}[value['enum']]
+            enum = {'Side': Side, 'OrderStatus': OrderStatus, 'FailurePolicy': FailurePolicy}[value['enum']]
             return enum(value['value'])
         if set(value) == {'type', 'fields'}:
             cls = _TYPES[value['type']]

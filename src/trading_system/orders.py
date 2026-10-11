@@ -22,6 +22,9 @@ from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, TransferPosition
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
+from .plan_execution import PlanBook
+from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks,
+                    PlanSnapshot, RetryPlan, SubmitPlan)
 
 
 def strategy_recipient(strategy_id: str) -> str:
@@ -59,6 +62,7 @@ class OrderManager:
         self.journal = journal
         self._transition_lock = asyncio.Lock()
         self._revision = 0
+        self._plans = PlanBook()
         self._inventory_operations: dict[str, InventoryCommand] = {}
         self._inventory_gateways: dict[str, datetime] = {}
         self._inventory_cutoffs: dict[str, datetime] = {}
@@ -93,6 +97,7 @@ class OrderManager:
                 and (self.journal is None or (self.journal.writable and not self.journal.degraded)))
 
     def _copy_state(self, candidate: 'OrderManager') -> None:
+        candidate._plans = self._plans.fork()
         candidate._revision = self._revision
         candidate._inventory_operations = self._inventory_operations.copy()
         candidate._inventory_gateways = self._inventory_gateways.copy()
@@ -112,6 +117,7 @@ class OrderManager:
         candidate._unreconciled = self._unreconciled.copy()
 
     def _adopt(self, candidate: 'OrderManager') -> None:
+        self._plans = candidate._plans
         self._revision = candidate._revision
         self._inventory_operations = candidate._inventory_operations
         self._inventory_gateways = candidate._inventory_gateways
@@ -147,13 +153,15 @@ class OrderManager:
     async def _transition(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
         if self._failed_after_commit:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
+        if self._plans.duplicate(message):
+            return
         if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             previous = self._inventory_operations.get(message.operation_id)
             if previous is not None:
                 if previous != message:
                     raise ValueError('operation identifier has conflicting contents')
                 return
-        if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual)) and not self.ready:
+        if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual, SubmitPlan, RetryPlan, AcknowledgePlan)) and not self.ready:
             raise RuntimeError('trading is blocked until storage, capital and gateway reconciliation are ready')
         generated: list[str] = []
 
@@ -331,6 +339,8 @@ class OrderManager:
             self._invalidate_allocation()
 
     async def _transfer_position(self, command: TransferPosition) -> None:
+        if self._plans.active(command.source_id) or self._plans.active(command.target_id):
+            raise ValueError('finish active plans before transferring ownership')
         if self._unreconciled or self._storage_blocked:
             raise RuntimeError('ownership transfer requires reconciled inventory and healthy storage')
         policy = self._capital_policy
@@ -363,8 +373,36 @@ class OrderManager:
         if order.status is OrderStatus.REJECTED:
             raise ValueError(order.rejection_reason)
 
+    def plan(self, plan_id: str) -> PlanSnapshot:
+        return self._plans.states[plan_id]
+
+    def has_active_plan(self, owner: str) -> bool:
+        return self._plans.active(owner)
+
+    def strategy_paused(self, owner: str) -> bool:
+        return self._plans.paused(owner)
+
+    def _batch_error(self, owner: str, intents: tuple[OrderIntent, ...]) -> str | None:
+        previous = self._orders
+        self._orders = previous.copy()
+        try:
+            for index, intent in enumerate(intents):
+                key = f'__plan_preflight_{index}'
+                while key in self._orders:
+                    key += '_'
+                order = OrderSnapshot(key, owner, intent, self.clock.now())
+                reason = self._intent_error(intent) or self._admission_error(owner, intent, order)
+                if reason:
+                    return reason
+                self._orders[key] = order
+        finally:
+            self._orders = previous
+        return None
+
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
-        if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
+        if isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan, AcknowledgePlan)):
+            await self._plans.handle(self, message)
+        elif isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             if message.expected_revision != self._revision:
                 raise ValueError('inventory revision changed; refresh the operator view')
             if isinstance(message, InventoryReport):
@@ -393,10 +431,15 @@ class OrderManager:
                 for order_id in tuple(self._cancellations):
                     await self._finish_cancel(order_id)
         elif isinstance(message, SubmitOrder):
+            if self._plans.active(message.strategy_id) or self._plans.paused(message.strategy_id):
+                raise ValueError('plan owns trading actions until its cycle and alerts are resolved')
             if message.strategy_id == MANUAL:
                 raise ValueError('manual strategy accepts only explicit bounded close commands')
             await self._new_order(message.strategy_id, message.intent)
         elif isinstance(message, (CancelOrder, ReplaceOrder)):
+            if isinstance(message, ReplaceOrder) and (self._plans.active(message.strategy_id)
+                                                     or self._plans.paused(message.strategy_id)):
+                raise ValueError('individual plan orders cannot be replaced')
             await self._request_cancel(message)
         elif isinstance(message, GatewayAccepted):
             await self._accepted(message)
@@ -408,6 +451,7 @@ class OrderManager:
             await self._execute(message)
         else:
             raise ValueError('unexpected order-manager message')
+        await self._plans.advance(self, message)
 
     @property
     def capital_policy(self) -> CapitalPolicy | None:
