@@ -11,12 +11,14 @@ from .domain import (
     OrderSnapshot, OrderStatus, ReplaceOrder, Route, Side, SubmitOrder,
 )
 from .persistence import JournalError
-from .capital import AccountKey
+from .capital import AccountCapital, AccountKey
 from .admission import (
     AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
 )
+from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
 
 _TYPES = {cls.__name__: cls for cls in (
+    AccountCapital, AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital,
     AccountKey, AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
     InstrumentId, Instrument, Route, OrderIntent, OrderSnapshot, SubmitOrder, CancelOrder, ReplaceOrder,
     GatewayAccepted, GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewayReconciled, Execution,
