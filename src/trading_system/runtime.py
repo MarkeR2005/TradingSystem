@@ -4,7 +4,7 @@ from dataclasses import replace
 from types import TracebackType
 from uuid import uuid4
 
-from .domain import Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated
+from .domain import Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
 from .events import EventBus, deliver_pending_cancellation
 from .ledger import PositionLedger
 from .market_data import CandleBook
@@ -16,6 +16,8 @@ from .optimization import (
 )
 from .persistence import DurableJournal
 from .admission import CapitalPolicy
+from .capital import CapitalPlan
+from .rebalance import CapitalSource, CapitalTarget
 from .orders import OrderManager, strategy_recipient
 from .state import JsonObject, json_object
 from .simulation import Gateway
@@ -226,13 +228,29 @@ class TradingRuntime:
 
     def _check_operator_call(self) -> None:
         self._check_active()
+        if self._closing:
+            raise RuntimeError('runtime is closing')
         if self._in_callback():
             raise RuntimeError('operator lifecycle commands must run outside callbacks')
 
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         self._check_operator_call()
         await self.bus.drain()
+        self._check_operator_call()
         await self.orders.configure_capital(policy)
+
+    async def rebalance_capital(self, source: CapitalSource, targets: tuple[CapitalTarget, ...],
+                                *, timeout: float = 10) -> CapitalPlan:
+        self._check_operator_call()
+        positive(timeout, 'capital source timeout')
+        current = self.orders.capital_policy
+        expected = current.revision if current is not None else 0
+        async with asyncio.timeout(timeout):
+            snapshot = await source.load()
+        self._check_operator_call()
+        await self.bus.drain()
+        self._check_operator_call()
+        return await self.orders.rebalance_capital(snapshot, targets, expected_revision=expected)
 
     async def pause_strategy(self, name: str) -> None:
         self._check_operator_call()

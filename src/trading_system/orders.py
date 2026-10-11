@@ -13,8 +13,9 @@ from .domain import (
     SubmitOrder, Route, Side,
 )
 from . import codec
-from .admission import CapitalDeficit, CapitalPolicy, ConfigureCapital, RouteExposure, usage_from_exposure
-from .capital import AccountKey, CapitalUsage, _exact, _number
+from .admission import CapitalDeficit, CapitalPolicy, ConfigureCapital, RouteExposure, RouteValuation, usage_from_exposure
+from .capital import AccountKey, CapitalPlan, CapitalUsage, _exact, _number
+from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocate_policy, initial_policy
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
 from .lifecycle import decode_strategy_record
@@ -58,6 +59,8 @@ class OrderManager:
         self._capital_required = require_capital
         self._capital_refreshed = not require_capital
         self._capital_policy: CapitalPolicy | None = None
+        self._capital_plan: CapitalPlan | None = None
+        self._capital_snapshot: CapitalSnapshot | None = None
         self._observed_prices: dict[Route, float] = {}
         self._id_factory = id_factory
         self._unreconciled: set[str] = set()
@@ -83,6 +86,8 @@ class OrderManager:
         candidate._capital_required = self._capital_required
         candidate._capital_refreshed = self._capital_refreshed
         candidate._capital_policy = self._capital_policy
+        candidate._capital_plan = self._capital_plan
+        candidate._capital_snapshot = self._capital_snapshot
         candidate._observed_prices = self._observed_prices.copy()
         candidate.gateway_ids = self.gateway_ids.copy()
         candidate._orders = self._orders.copy()
@@ -96,6 +101,8 @@ class OrderManager:
         self._capital_required = candidate._capital_required
         self._capital_refreshed = candidate._capital_refreshed
         self._capital_policy = candidate._capital_policy
+        self._capital_plan = candidate._capital_plan
+        self._capital_snapshot = candidate._capital_snapshot
         self._observed_prices = candidate._observed_prices
         self._orders = candidate._orders
         self._local_rejections = candidate._local_rejections
@@ -105,14 +112,21 @@ class OrderManager:
         self._unreconciled = candidate._unreconciled
         self.ledger.adopt(candidate.ledger)
 
-    async def handle(self, message: Message | ConfigureCapital) -> None:
+    async def handle(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
         async with self._transition_lock:
             await self._transition(message)
 
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         await self.handle(ConfigureCapital(policy))
 
-    async def _transition(self, message: Message | ConfigureCapital) -> None:
+    async def rebalance_capital(self, snapshot: CapitalSnapshot, targets: tuple[CapitalTarget, ...],
+                                *, expected_revision: int) -> CapitalPlan:
+        async with self._transition_lock:
+            await self._transition(RebalanceCapital(snapshot, targets, expected_revision))
+            assert self._capital_plan is not None
+            return self._capital_plan
+
+    async def _transition(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
         if self._failed_after_commit:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
         if isinstance(message, (SubmitOrder, ReplaceOrder)) and not self.ready:
@@ -230,9 +244,12 @@ class OrderManager:
     def orders(self, strategy_id: str) -> tuple[OrderSnapshot, ...]:
         return tuple(order for order in self._orders.values() if order.strategy_id == strategy_id)
 
-    async def _handle(self, message: Message | ConfigureCapital) -> None:
-        if isinstance(message, ConfigureCapital):
-            self._configure_capital(message.policy)
+    async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
+        if isinstance(message, (ConfigureCapital, RebalanceCapital)):
+            if isinstance(message, RebalanceCapital):
+                self._rebalance_capital(message)
+            else:
+                self._configure_capital(message.policy)
             if self.ready:
                 for order_id in tuple(self._cancellations):
                     await self._finish_cancel(order_id)
@@ -261,6 +278,40 @@ class OrderManager:
     def capital_policy(self) -> CapitalPolicy | None:
         return self._capital_policy
 
+    @property
+    def capital_plan(self) -> CapitalPlan | None:
+        return self._capital_plan
+
+    @property
+    def capital_snapshot(self) -> CapitalSnapshot | None:
+        return self._capital_snapshot
+
+    def _rebalance_capital(self, command: RebalanceCapital) -> None:
+        revision = self._capital_policy.revision if self._capital_policy is not None else 0
+        if command.expected_revision != revision:
+            raise ValueError('capital revision changed during refresh')
+        snapshot = command.snapshot
+        previous = self._capital_snapshot
+        if previous is not None and (snapshot.source_id != previous.source_id
+                                     or snapshot.sequence <= previous.sequence
+                                     or snapshot.as_of < previous.as_of):
+            raise ValueError('capital source identity, sequence or timestamp is stale')
+        self._configure_capital(initial_policy(snapshot, command.targets, revision + 1))
+        # A source request may overlap fills. A snapshot must not erase later
+        # executions, including those sharing its timestamp. Older fills may be
+        # revalued by a genuinely newer source mark.
+        for execution in self._executions.values():
+            if execution.timestamp >= snapshot.as_of:
+                self._observed_prices[execution.route] = max(
+                    self._observed_prices.get(execution.route, 0), abs(execution.price))
+        exposures = self._exposures()
+        prices = {item.route: _number(item.price) for item in exposures}
+        valuations = tuple(RouteValuation(item.route, max(item.price, prices.get(item.route, 0),
+                                                          self._observed_prices.get(item.route, 0)))
+                           for item in snapshot.valuations)
+        self._capital_plan, self._capital_policy = allocate_policy(command, usage_from_exposure(exposures), valuations)
+        self._capital_snapshot = snapshot
+
     def _configure_capital(self, policy: CapitalPolicy) -> None:
         current = self._capital_policy
         if policy.report_currency != self.ledger.report_currency:
@@ -277,6 +328,7 @@ class OrderManager:
         for route in active:
             policy.price(route)  # Revoking grants cannot hide occupied financial risk.
         self._capital_policy = policy
+        self._capital_plan = None
         self._capital_required = True
         self._capital_refreshed = True
         self._observed_prices = {}
