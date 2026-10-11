@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
 from fractions import Fraction
+from math import fsum
 from typing import Protocol
 from uuid import uuid4
 
@@ -10,7 +11,7 @@ from .domain import (
     CancelOrder, Execution, ExecutionApplied, GatewayAccepted, GatewayCancel,
     GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewaySubmit,
     GatewayReconciled, Message, OrderIntent, OrderSnapshot, OrderStatus, OrderUpdated, ReplaceOrder,
-    SubmitOrder, Route, Side,
+    SubmitOrder, Route, Side, PositionChanged,
 )
 from . import codec
 from .admission import CapitalDeficit, CapitalPolicy, ConfigureCapital, RouteExposure, RouteValuation, usage_from_exposure
@@ -18,6 +19,7 @@ from .capital import AccountKey, CapitalPlan, CapitalUsage, _exact, _number
 from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocate_policy, initial_policy
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
+from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, TransferPosition
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 
@@ -56,6 +58,10 @@ class OrderManager:
                  id_factory: Callable[[], str] = lambda: uuid4().hex) -> None:
         self.journal = journal
         self._transition_lock = asyncio.Lock()
+        self._revision = 0
+        self._inventory_operations: dict[str, InventoryCommand] = {}
+        self._inventory_gateways: dict[str, datetime] = {}
+        self._inventory_cutoffs: dict[str, datetime] = {}
         self._capital_required = require_capital
         self._capital_refreshed = not require_capital
         self._capital_policy: CapitalPolicy | None = None
@@ -77,12 +83,20 @@ class OrderManager:
         self._cancel_outcomes: dict[tuple[str, str], GatewayCancelled | GatewayCancelRejected] = {}
 
     @property
+    def revision(self) -> int:
+        return self._revision
+
+    @property
     def ready(self) -> bool:
         return (self._capital_refreshed and not self._unreconciled
                 and not self._storage_blocked and not self._failed_after_commit
                 and (self.journal is None or (self.journal.writable and not self.journal.degraded)))
 
     def _copy_state(self, candidate: 'OrderManager') -> None:
+        candidate._revision = self._revision
+        candidate._inventory_operations = self._inventory_operations.copy()
+        candidate._inventory_gateways = self._inventory_gateways.copy()
+        candidate._inventory_cutoffs = self._inventory_cutoffs.copy()
         candidate._capital_required = self._capital_required
         candidate._capital_refreshed = self._capital_refreshed
         candidate._capital_policy = self._capital_policy
@@ -98,6 +112,10 @@ class OrderManager:
         candidate._unreconciled = self._unreconciled.copy()
 
     def _adopt(self, candidate: 'OrderManager') -> None:
+        self._revision = candidate._revision
+        self._inventory_operations = candidate._inventory_operations
+        self._inventory_gateways = candidate._inventory_gateways
+        self._inventory_cutoffs = candidate._inventory_cutoffs
         self._capital_required = candidate._capital_required
         self._capital_refreshed = candidate._capital_refreshed
         self._capital_policy = candidate._capital_policy
@@ -112,7 +130,7 @@ class OrderManager:
         self._unreconciled = candidate._unreconciled
         self.ledger.adopt(candidate.ledger)
 
-    async def handle(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
+    async def handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
         async with self._transition_lock:
             await self._transition(message)
 
@@ -126,10 +144,16 @@ class OrderManager:
             assert self._capital_plan is not None
             return self._capital_plan
 
-    async def _transition(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
+    async def _transition(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
         if self._failed_after_commit:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
-        if isinstance(message, (SubmitOrder, ReplaceOrder)) and not self.ready:
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
+            previous = self._inventory_operations.get(message.operation_id)
+            if previous is not None:
+                if previous != message:
+                    raise ValueError('operation identifier has conflicting contents')
+                return
+        if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual)) and not self.ready:
             raise RuntimeError('trading is blocked until storage, capital and gateway reconciliation are ready')
         generated: list[str] = []
 
@@ -144,6 +168,7 @@ class OrderManager:
         candidate._storage_blocked = (self.journal is not None
                                       and (not self.journal.writable or self.journal.degraded))
         await candidate._handle(message)
+        candidate._revision += 1
         record = {'version': 2, 'capital_refreshed': self._capital_refreshed,
                   'time': self.clock.now().isoformat(), 'ids': generated,
                   'gateways': sorted(self.gateway_ids), 'unreconciled': sorted(self._unreconciled),
@@ -161,7 +186,7 @@ class OrderManager:
     async def restore(self) -> None:
         if self.journal is None:
             return
-        if self._orders:
+        if self._revision or self._orders:
             raise RuntimeError('restore requires an empty order manager')
         candidate = OrderManager(_PlannedEvents(), self.clock, PositionLedger(self.ledger.report_currency))
         # Historical commands replay in their original mode; the caller's stricter
@@ -200,6 +225,7 @@ class OrderManager:
                 candidate._storage_blocked = record['storage_blocked']
                 candidate._capital_refreshed = record.get('capital_refreshed', True)
                 await candidate._handle(codec.decode(record['message']))
+                candidate._revision += 1
                 if next(identifiers, None) is not None:
                     raise JournalError('journal has unused generated identifiers')
                 latest = timestamp
@@ -209,7 +235,7 @@ class OrderManager:
         self._adopt(candidate)
         self._capital_refreshed = not self._capital_required
         self._unreconciled = {o.intent.route.instrument.id.gateway_id for o in self._orders.values()
-                             if o.order_id not in self._local_rejections}
+                             if o.order_id not in self._local_rejections} | set(self._inventory_gateways)
         if latest is not None and isinstance(self.clock, ManualClock) and self.clock.now() < latest:
             self.clock.advance_to(latest)
 
@@ -244,8 +270,114 @@ class OrderManager:
     def orders(self, strategy_id: str) -> tuple[OrderSnapshot, ...]:
         return tuple(order for order in self._orders.values() if order.strategy_id == strategy_id)
 
-    async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital) -> None:
-        if isinstance(message, (ConfigureCapital, RebalanceCapital)):
+    def _invalidate_allocation(self) -> None:
+        self._capital_plan = None
+        self._capital_required = True
+        self._capital_refreshed = False
+
+    async def _inventory_report(self, command: InventoryReport) -> None:
+        gateway = command.gateway_id
+        previous_time = self._inventory_gateways.get(gateway)
+        if (gateway not in self.gateway_ids or command.as_of > self.clock.now()
+                or (previous_time is not None and command.as_of < previous_time)
+                or any(o.submitted_at > command.as_of for o in command.observed_orders)
+                or any(e.timestamp > command.as_of for e in self._executions.values()
+                       if e.route.instrument.id.gateway_id == gateway)):
+            raise ValueError('inventory gateway or cutover time is invalid')
+        incoming = [p.route for p in command.openings] + [p.route for p in command.observed_positions]
+        incoming += [item.order.intent.route for item in command.imports]
+        incoming += [order.intent.route for order in command.observed_orders]
+        if any(r.instrument.id.gateway_id != gateway or r.instrument.currency != self.ledger.report_currency
+               for r in incoming):
+            raise ValueError('inventory report has a foreign gateway or currency')
+        known = [p.route for _, p in self.ledger.positions()] + [o.intent.route for o in self._orders.values()]
+        if self._capital_policy is not None:
+            known += [v.route for v in self._capital_policy.valuations]
+        instruments = {r.instrument.id: r.instrument for r in known}
+        for route in incoming:
+            if instruments.setdefault(route.instrument.id, route.instrument) != route.instrument:
+                raise ValueError('conflicting inventory instrument metadata')
+        for item in command.imports:
+            order = item.order
+            if order.order_id in self._orders or order.submitted_at > command.as_of:
+                raise ValueError('external order is already known or future-dated')
+            for execution in item.executions:
+                if execution.key in self._executions or execution.timestamp > command.as_of:
+                    raise ValueError('external execution identifier is known or future-dated')
+                # These fills establish a deduplication baseline; their P&L is
+                # before this system's cutover and must never be applied again.
+                self._executions[execution.key] = execution
+            await self._update(replace(order, strategy_id=MANUAL))
+        for opening in command.openings:
+            previous = self.ledger.position(MANUAL, opening.route)
+            self.ledger.import_balance(MANUAL, opening, command.as_of)
+            await self.bus.publish(strategy_recipient(MANUAL), PositionChanged(
+                command.operation_id, previous, self.ledger.position(MANUAL, opening.route)))
+        self._validate_reconciliation(gateway, command.observed_orders)
+        quantities: dict[Route, list[float]] = {}
+        for _, position in self.ledger.positions():
+            if position.route.instrument.id.gateway_id == gateway:
+                quantities.setdefault(position.route, []).append(position.quantity)
+        observed = {p.route: p.quantity for p in command.observed_positions}
+        for route in quantities.keys() | observed.keys():
+            if not route.instrument.quantities_equal(fsum(quantities.get(route, ())), observed.get(route, 0)):
+                raise ValueError('broker net positions differ; reconcile executions before importing residuals')
+        self._inventory_gateways[gateway] = command.as_of
+        for order in self._orders.values():
+            if order.intent.route.instrument.id.gateway_id == gateway:
+                self._inventory_cutoffs[order.order_id] = command.as_of
+        self._unreconciled.discard(gateway)
+        if command.openings or command.imports:
+            self._invalidate_allocation()
+
+    async def _transfer_position(self, command: TransferPosition) -> None:
+        if self._unreconciled or self._storage_blocked:
+            raise RuntimeError('ownership transfer requires reconciled inventory and healthy storage')
+        policy = self._capital_policy
+        if command.target_id != MANUAL and (policy is None or not any(
+                g.strategy_id == command.target_id and g.route == command.route for g in policy.grants)):
+            raise ValueError('target has no route grant')
+        if any(o.strategy_id in (command.source_id, command.target_id) and o.intent.route == command.route
+               and (not o.status.terminal or o.order_id in self._cancellations) for o in self._orders.values()):
+            raise ValueError('finish all route orders and cancellation barriers before transferring')
+        previous = {owner: self.ledger.position(owner, command.route)
+                    for owner in (command.source_id, command.target_id)}
+        self.ledger.transfer(command, self.clock.now())
+        for owner, position in previous.items():
+            await self.bus.publish(strategy_recipient(owner), PositionChanged(
+                command.operation_id, position, self.ledger.position(owner, command.route)))
+        self._invalidate_allocation()
+
+    async def _close_manual(self, command: CloseManual) -> None:
+        position = self.ledger.position(MANUAL, command.route)
+        side = Side.SELL if position.quantity > 0 else Side.BUY
+        active = [o for o in self.orders(MANUAL) if o.intent.route == command.route and not o.status.terminal]
+        remaining = fsum(o.remaining_quantity for o in active)
+        total = remaining + command.quantity
+        if (position.quantity == 0 or any(o.intent.side != side for o in active)
+                or (total > abs(position.quantity)
+                    and not command.route.instrument.quantities_equal(total, abs(position.quantity)))):
+            raise ValueError('manual close would exceed position or conflict with an opening order')
+        intent = OrderIntent(command.route, side, command.quantity, command.limit_price)
+        order = await self._new_order(MANUAL, intent)
+        if order.status is OrderStatus.REJECTED:
+            raise ValueError(order.rejection_reason)
+
+    async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
+            if message.expected_revision != self._revision:
+                raise ValueError('inventory revision changed; refresh the operator view')
+            if isinstance(message, InventoryReport):
+                await self._inventory_report(message)
+            elif isinstance(message, TransferPosition):
+                await self._transfer_position(message)
+            else:
+                await self._close_manual(message)
+            self._inventory_operations[message.operation_id] = message
+            if self.ready:
+                for order_id in tuple(self._cancellations):
+                    await self._finish_cancel(order_id)
+        elif isinstance(message, (ConfigureCapital, RebalanceCapital)):
             if isinstance(message, RebalanceCapital):
                 self._rebalance_capital(message)
             else:
@@ -255,11 +387,14 @@ class OrderManager:
                     await self._finish_cancel(order_id)
         elif isinstance(message, GatewayReconciled):
             self._validate_reconciliation(message.gateway_id, message.observed)
-            self._unreconciled.discard(message.gateway_id)
+            if message.gateway_id not in self._inventory_gateways:
+                self._unreconciled.discard(message.gateway_id)
             if self.ready:
                 for order_id in tuple(self._cancellations):
                     await self._finish_cancel(order_id)
         elif isinstance(message, SubmitOrder):
+            if message.strategy_id == MANUAL:
+                raise ValueError('manual strategy accepts only explicit bounded close commands')
             await self._new_order(message.strategy_id, message.intent)
         elif isinstance(message, (CancelOrder, ReplaceOrder)):
             await self._request_cancel(message)
@@ -490,6 +625,8 @@ class OrderManager:
 
     async def _request_cancel(self, message: CancelOrder | ReplaceOrder) -> None:
         order = self._orders[message.order_id]
+        if isinstance(message, ReplaceOrder) and message.strategy_id == MANUAL:
+            raise ValueError('manual orders must be cancelled before a new bounded close')
         if order.strategy_id != message.strategy_id:
             raise ValueError('strategy does not own order')
         intent = message.intent if isinstance(message, ReplaceOrder) else None
@@ -593,6 +730,9 @@ class OrderManager:
                 raise ValueError('execution identifier has conflicting contents')
             return
         order = self._orders[execution.order_id]
+        cutoff = self._inventory_cutoffs.get(order.order_id)
+        if cutoff is not None and execution.timestamp <= cutoff:
+            raise ValueError('unknown execution at or before inventory cutover')
         if order.status.terminal:
             raise ValueError('order cannot receive further executions')
         if execution.route != order.intent.route or execution.side != order.intent.side:

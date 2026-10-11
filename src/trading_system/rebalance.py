@@ -11,6 +11,7 @@ from .capital import (
     StrategyCapital, _exact, _name, _nonnegative, _number, allocate_capital,
 )
 from .domain import Route, utc
+from .inventory import MANUAL
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class CapitalTarget:
     desired_leverage: float = 1
 
     def __post_init__(self) -> None:
+        if self.strategy_id == MANUAL and self.weight != 0:
+            raise ValueError('manual strategy weight must be zero')
         if not isinstance(self.legs, tuple) or not all(isinstance(leg, AllocationLeg) for leg in self.legs):
             raise ValueError('allocation legs must be an immutable typed tuple')
         StrategyCapital(self.strategy_id, self.weight,
