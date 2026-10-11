@@ -15,6 +15,7 @@ from .optimization import (
     validate_history, validate_worker,
 )
 from .persistence import DurableJournal
+from .admission import CapitalPolicy
 from .orders import OrderManager, strategy_recipient
 from .state import JsonObject, json_object
 from .simulation import Gateway
@@ -140,11 +141,12 @@ class TradingRuntime:
     def __init__(self, clock: ManualClock, *, journal: DurableJournal | None = None,
                  history: HistorySource | None = None, optimizer: Optimizer | None = None,
                  order_id_factory: Callable[[], str] = lambda: uuid4().hex,
-                 optimization_enabled: bool = True) -> None:
+                 optimization_enabled: bool = True, require_capital: bool = False) -> None:
         self.clock = clock
         self.bus = EventBus()
         self.ledger = PositionLedger()
-        self.orders = OrderManager(self.bus, clock, self.ledger, journal=journal, id_factory=order_id_factory)
+        self.orders = OrderManager(self.bus, clock, self.ledger, journal=journal,
+                                   id_factory=order_id_factory, require_capital=require_capital)
         self.lifecycle = LifecycleStore(journal)
         self.market = CandleBook(clock)
         self.history: HistorySource = history if history is not None else self.market
@@ -226,6 +228,11 @@ class TradingRuntime:
         self._check_active()
         if self._in_callback():
             raise RuntimeError('operator lifecycle commands must run outside callbacks')
+
+    async def configure_capital(self, policy: CapitalPolicy) -> None:
+        self._check_operator_call()
+        await self.bus.drain()
+        await self.orders.configure_capital(policy)
 
     async def pause_strategy(self, name: str) -> None:
         self._check_operator_call()
