@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from fractions import Fraction
 
 from .domain import OrderIntent, Route, finite, positive, utc
 
@@ -43,6 +44,51 @@ class PlanLeg:
 
 
 @dataclass(frozen=True)
+class TrailingStop:
+    distance: float
+    activation: float = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.distance, bool) or isinstance(self.activation, bool):
+            raise ValueError('trailing limits must be numeric, not bool')
+        positive(self.distance, 'trailing distance')
+        finite(self.activation, 'trailing activation')
+        if self.activation < 0:
+            raise ValueError('trailing activation must be nonnegative')
+
+
+@dataclass(frozen=True)
+class PlanProtection:
+    stop_loss: float
+    take_profit: float | None = None
+    trailing: TrailingStop | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.stop_loss, bool) or isinstance(self.take_profit, bool):
+            raise ValueError('protection limits must be numeric, not bool')
+        positive(self.stop_loss, 'plan stop loss')
+        if self.take_profit is not None:
+            positive(self.take_profit, 'plan take profit')
+        if self.trailing is not None and not isinstance(self.trailing, TrailingStop):
+            raise ValueError('plan trailing must be a typed specification')
+
+
+class ProtectionKind(str, Enum):
+    STOP_LOSS = 'stop_loss'
+    TAKE_PROFIT = 'take_profit'
+    TRAILING = 'trailing'
+
+
+@dataclass(frozen=True)
+class ProtectionTrigger:
+    kind: ProtectionKind
+    timestamp: datetime
+    mark_sequence: int
+    pnl: Fraction
+    threshold: Fraction
+
+
+@dataclass(frozen=True)
 class TradePlan:
     plan_id: str
     strategy_id: str
@@ -51,6 +97,8 @@ class TradePlan:
     expires_at: datetime
     stop_loss: float
     recovery_timeout: float = 30
+    take_profit: float | None = None
+    trailing: TrailingStop | None = None
 
     def __post_init__(self) -> None:
         name(self.plan_id)
@@ -64,7 +112,7 @@ class TradePlan:
         object.__setattr__(self, 'expires_at', utc(self.expires_at))
         if isinstance(self.stop_loss, bool) or isinstance(self.recovery_timeout, bool):
             raise ValueError('plan risk limits must be numeric, not bool')
-        positive(self.stop_loss, 'plan stop loss')
+        PlanProtection(self.stop_loss, self.take_profit, self.trailing)
         positive(self.recovery_timeout, 'plan recovery timeout')
         try:
             self.expires_at + timedelta(seconds=self.recovery_timeout)
@@ -160,6 +208,25 @@ class AcknowledgePlan:
 
 
 @dataclass(frozen=True)
+class UpdatePlanProtection:
+    operation_id: str
+    expected_revision: int
+    strategy_id: str
+    plan_id: str
+    protection: PlanProtection
+    exit_prices: tuple[PlanPrice, ...] | None = None
+
+    def __post_init__(self) -> None:
+        operation(self.operation_id, self.expected_revision)
+        name(self.strategy_id)
+        name(self.plan_id)
+        if not isinstance(self.protection, PlanProtection):
+            raise ValueError('protection update requires a typed policy')
+        if self.exit_prices is not None:
+            prices(self.exit_prices)
+
+
+@dataclass(frozen=True)
 class PlanAlert:
     timestamp: datetime
     reason: str
@@ -180,6 +247,9 @@ class PlanSnapshot:
     exit_prices: tuple[PlanPrice, ...] = ()
     marks: PlanMarks | None = None
     pnl: float | None = None
+    protection: PlanProtection | None = None
+    peak_pnl: Fraction | None = None
+    protection_trigger: ProtectionTrigger | None = None
 
 
-type PlanCommand = SubmitPlan | ClosePlan | CheckPlanDeadlines | PlanMarks | RetryPlan | AcknowledgePlan
+type PlanCommand = SubmitPlan | ClosePlan | CheckPlanDeadlines | PlanMarks | RetryPlan | AcknowledgePlan | UpdatePlanProtection

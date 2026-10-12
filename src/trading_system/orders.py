@@ -26,7 +26,7 @@ from .plan_execution import PlanBook
 from .deficit_execution import DeficitBook
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitSnapshot, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks,
-                    PlanSnapshot, RetryPlan, SubmitPlan)
+                    PlanSnapshot, RetryPlan, SubmitPlan, UpdatePlanProtection)
 
 
 def strategy_recipient(strategy_id: str) -> str:
@@ -167,7 +167,7 @@ class OrderManager:
                     raise ValueError('operation identifier has conflicting contents')
                 return
         if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual, SubmitPlan, RetryPlan, AcknowledgePlan,
-                                StartDeficit, RetryDeficit, AcknowledgeDeficit)) and not self.ready:
+                                StartDeficit, RetryDeficit, AcknowledgeDeficit, UpdatePlanProtection)) and not self.ready:
             raise RuntimeError('trading is blocked until storage, capital and gateway reconciliation are ready')
         generated: list[str] = []
 
@@ -418,7 +418,8 @@ class OrderManager:
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
         if isinstance(message, (StartDeficit, RetryDeficit, AcknowledgeDeficit, CheckDeficits)):
             await self._deficits.handle(self, message)
-        elif isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan, AcknowledgePlan)):
+        elif isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan,
+                                  AcknowledgePlan, UpdatePlanProtection)):
             await self._plans.handle(self, message)
         elif isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             if message.expected_revision != self._revision:
