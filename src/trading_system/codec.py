@@ -13,7 +13,8 @@ from .domain import (
 from .persistence import JournalError
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy,
-                    PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan)
+                    PlanLeg, PlanMarks, PlanPrice, PlanProtection, RetryPlan, SubmitPlan, TradePlan,
+                    TrailingStop, UpdatePlanProtection)
 from .inventory import BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition
 from .capital import AccountCapital, AccountKey
 from .admission import (
@@ -22,6 +23,7 @@ from .admission import (
 from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
 
 _TYPES = {cls.__name__: cls for cls in (
+    PlanProtection, TrailingStop, UpdatePlanProtection,
     AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit,
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan,
     BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition,
@@ -68,7 +70,12 @@ def decode(value: Any) -> Any:
         if set(value) == {'type', 'fields'}:
             cls = _TYPES[value['type']]
             arguments = value['fields']
-            if set(arguments) != {field.name for field in fields(cls)}:
+            expected = {field.name for field in fields(cls)}
+            # Exact historical TradePlan shape from iterations 10/11 only. Keep
+            # required fields and all other journal types strict.
+            if cls is TradePlan and set(arguments) == expected - {'take_profit', 'trailing'}:
+                arguments = {**arguments, 'take_profit': None, 'trailing': None}
+            if set(arguments) != expected:
                 raise ValueError('invalid durable fields')
             return cls(**{key: decode(item) for key, item in arguments.items()})
     except (KeyError, TypeError, ValueError, AttributeError) as error:

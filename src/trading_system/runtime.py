@@ -26,7 +26,7 @@ from .simulation import Gateway
 from .strategy import AutoStrategy, StrategyContext
 from .time import ManualClock
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitCommand, RetryDeficit, StartDeficit
-from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan
+from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan, UpdatePlanProtection
 
 
 class _StrategyRunner:
@@ -301,7 +301,8 @@ class TradingRuntime:
         await self.orders.handle(CancelOrder(MANUAL, order_id))
         await self.bus.drain()
 
-    async def _risk_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan | AcknowledgePlan | DeficitCommand) -> None:
+    async def _risk_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan
+                             | AcknowledgePlan | UpdatePlanProtection | DeficitCommand) -> None:
         self._check_operator_call()
         await self.bus.drain()
         self._check_operator_call()
@@ -310,6 +311,9 @@ class TradingRuntime:
 
     async def close_plan(self, plan_id: str) -> None:
         await self._risk_operator(ClosePlan(self.orders.plan(plan_id).plan.strategy_id, plan_id))
+
+    async def update_plan_protection(self, command: UpdatePlanProtection) -> None:
+        await self._risk_operator(command)
 
     async def mark_plan(self, marks: PlanMarks) -> None:
         await self._risk_operator(marks)

@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING
 from .domain import CancelOrder, Execution, GatewayCancelRejected, Message, OrderIntent, OrderStatus, PlanUpdated, Side
 from .capital import _exact, _number
 from .inventory import MANUAL
+from .protection import evaluate_protection
 from .plans import (
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy, PlanAlert,
-    PlanMarks, PlanPhase, PlanPrice, PlanSnapshot, RetryPlan, SubmitPlan,
+    PlanMarks, PlanPhase, PlanPrice, PlanProtection, PlanSnapshot, ProtectionTrigger,
+    RetryPlan, SubmitPlan, UpdatePlanProtection,
 )
 
 if TYPE_CHECKING:
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
 class PlanBook:
     def __init__(self) -> None:
         self.states: dict[str, PlanSnapshot] = {}
-        self.operations: dict[str, RetryPlan | AcknowledgePlan] = {}
+        self.operations: dict[str, RetryPlan | AcknowledgePlan | UpdatePlanProtection] = {}
         self.waves: dict[str, tuple[str, ...]] = {}
 
     def fork(self) -> 'PlanBook':
@@ -43,7 +45,7 @@ class PlanBook:
                 if previous.plan != message.plan:
                     raise ValueError('plan identifier has conflicting contents')
                 return True
-        if isinstance(message, (RetryPlan, AcknowledgePlan)):
+        if isinstance(message, (RetryPlan, AcknowledgePlan, UpdatePlanProtection)):
             old = self.operations.get(message.operation_id)
             if old is not None:
                 if old != message:
@@ -112,6 +114,7 @@ class PlanBook:
             self.waves[spec.plan_id] = tuple(ids)
             await self._save(oms, PlanSnapshot(spec, PlanPhase.ENTERING, spec.expires_at,
                                               entry_ids=tuple(ids),
+                                              protection=PlanProtection(spec.stop_loss, spec.take_profit, spec.trailing),
                                               exit_prices=tuple(PlanPrice(l.intent.route, l.exit_limit) for l in spec.legs)))
         elif isinstance(message, ClosePlan):
             state = self.states[message.plan_id]
@@ -129,11 +132,26 @@ class PlanBook:
                 raise ValueError('plan marks are stale, future-dated or precede executions')
             await self._save(oms, replace(state, marks=message))
             await self._evaluate(oms, self.states[message.plan_id])
-        elif isinstance(message, (RetryPlan, AcknowledgePlan)):
+        elif isinstance(message, (RetryPlan, AcknowledgePlan, UpdatePlanProtection)):
             if message.expected_revision != oms.revision:
                 raise ValueError('plan operator revision changed')
             state = self.states[message.plan_id]
-            if isinstance(message, RetryPlan):
+            if isinstance(message, UpdatePlanProtection):
+                if state.plan.strategy_id != message.strategy_id:
+                    raise ValueError('strategy does not own plan protection')
+                if state.close_requested or state.phase not in (
+                        PlanPhase.ENTERING, PlanPhase.COMPLETING, PlanPhase.OPEN, PlanPhase.HELD):
+                    raise ValueError('cannot update protection after an exit trigger or while blocked/closed')
+                if not self._flat(oms, state) and not self._fresh_marks(oms, state):
+                    raise ValueError('protection update requires fresh marks covering all known fills')
+                exits = state.exit_prices if message.exit_prices is None else message.exit_prices
+                self._validate_prices(state, exits)
+                policy = oms.capital_policy
+                if policy is None or any(abs(p.price) > policy.price(p.route) for p in exits):
+                    raise ValueError('protection exit price exceeds capital valuation')
+                await self._save(oms, replace(state, protection=message.protection, exit_prices=exits))
+                await self._evaluate(oms, self.states[message.plan_id])
+            elif isinstance(message, RetryPlan):
                 if state.phase not in (PlanPhase.BLOCKED, PlanPhase.HELD):
                     raise ValueError('explicit exit retry requires a blocked or held plan')
                 self._validate_prices(state, message.exit_prices)
@@ -163,12 +181,19 @@ class PlanBook:
         if {item.route for item in marks} != {leg.intent.route for leg in state.plan.legs}:
             raise ValueError('prices must cover every exact plan route')
 
+    @staticmethod
+    def _fresh_marks(oms: 'OrderManager', state: PlanSnapshot) -> bool:
+        marks = state.marks
+        return (marks is not None and marks.as_of <= oms.clock.now() < marks.expires_at
+                and all(e.timestamp <= marks.as_of for e in oms._executions.values()
+                        if e.order_id in state.entry_ids + state.exit_ids))
+
     async def _evaluate(self, oms: 'OrderManager', state: PlanSnapshot) -> None:
         marks = state.marks
         if marks is None:
             return
         fills = [e for e in oms._executions.values() if e.order_id in state.entry_ids + state.exit_ids]
-        if oms.clock.now() >= marks.expires_at or any(e.timestamp > marks.as_of for e in fills):
+        if not self._fresh_marks(oms, state):
             await self._save(oms, replace(state, pnl=None))
             return
         cash = sum((-e.side.sign * _exact(e.quantity) * _exact(e.price)
@@ -188,12 +213,22 @@ class PlanBook:
                 await self._cancel(oms, state, FailurePolicy.PROTECT)
                 state = self.states[state.plan.plan_id]
         await self._save(oms, state)
-        if total <= -_exact(state.plan.stop_loss) and any(quantities.values()) and state.phase is not PlanPhase.CLOSED:
-            if state.phase is PlanPhase.BLOCKED or (state.close_requested and state.phase is PlanPhase.HELD):
-                await self._save(oms, self._alert(oms, state, 'stop loss breached while recovery is blocked'))
-            elif not state.close_requested:
-                await self._cancel(oms, replace(state, close_requested=True), FailurePolicy.CLOSE,
-                                   'aggregate executed P&L reached stop loss')
+        if not any(quantities.values()) or state.phase is PlanPhase.CLOSED or state.close_requested:
+            return
+        assert state.protection is not None
+        peak, breach = evaluate_protection(state.protection, total, state.peak_pnl)
+        state = replace(state, peak_pnl=peak)
+        if breach is None:
+            await self._save(oms, state)
+            return
+        kind, threshold = breach
+        trigger = ProtectionTrigger(kind, oms.clock.now(), marks.sequence, total, threshold)
+        state = replace(state, protection_trigger=trigger, close_requested=True)
+        if state.phase is PlanPhase.BLOCKED:
+            await self._save(oms, self._alert(oms, state, f'{kind.value} breached while recovery is blocked'))
+        else:
+            await self._cancel(oms, state, FailurePolicy.CLOSE,
+                               f'aggregate executed P&L reached {kind.value}')
 
     async def advance(self, oms: 'OrderManager', message: object) -> None:
         for plan_id in tuple(self.states):
