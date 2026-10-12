@@ -5,7 +5,7 @@ from dataclasses import replace
 from types import TracebackType
 from uuid import uuid4
 
-from .domain import CancelOrder, PlanUpdated, PositionChanged, Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
+from .domain import CancelOrder, DeficitUpdated, PlanUpdated, PositionChanged, Candle, CandleCorrected, CandleReceived, ExecutionApplied, Message, OrderSnapshot, OrderUpdated, positive
 from .events import EventBus, deliver_pending_cancellation
 from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryReport, TransferPosition
@@ -25,6 +25,7 @@ from .state import JsonObject, json_object
 from .simulation import Gateway
 from .strategy import AutoStrategy, StrategyContext
 from .time import ManualClock
+from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitCommand, RetryDeficit, StartDeficit
 from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan
 
 
@@ -79,12 +80,12 @@ class _StrategyRunner:
                 error.add_note(f'failed to persist failure status: {fallback_error}')
             error.add_note(f'failed computation checkpoint: {checkpoint_error}')
 
-    def apply_plan_pause(self) -> None:
+    def apply_risk_pause(self) -> None:
         if self.runtime.orders.strategy_paused(self.strategy.name) and self.status is not StrategyStatus.FAILED:
             if self.job is not None and not self.job.done():
                 self.job.cancel()
             if self.status is not StrategyStatus.PAUSED:
-                self.transition(StrategyStatus.PAUSED, 'plan alert requires operator acknowledgement')
+                self.transition(StrategyStatus.PAUSED, 'risk alert requires operator acknowledgement')
 
     async def handle(self, message: Message) -> None:
         if self.context is None:
@@ -92,7 +93,7 @@ class _StrategyRunner:
         async with self.lock:
             self.callback_task = asyncio.current_task()
             try:
-                self.apply_plan_pause()
+                self.apply_risk_pause()
                 if isinstance(message, (CandleReceived, CandleCorrected)):
                     if self.status is not StrategyStatus.RUNNING or not self.runtime.orders.ready:
                         return
@@ -104,6 +105,8 @@ class _StrategyRunner:
                         await self.strategy.on_candle(self.context, message.candle)
                 elif isinstance(message, ExecutionApplied):
                     await self.strategy.on_fill(self.context, message.execution)
+                elif isinstance(message, DeficitUpdated):
+                    await self.strategy.on_deficit(self.context, message)
                 elif isinstance(message, PlanUpdated):
                     await self.strategy.on_plan(self.context, message)
                 elif isinstance(message, PositionChanged):
@@ -130,7 +133,7 @@ class _StrategyRunner:
         async with self.lock:
             self.callback_task = asyncio.current_task()
             try:
-                self.apply_plan_pause()
+                self.apply_risk_pause()
                 if saved is None:
                     await self.strategy.on_start(self.context)
                 else:
@@ -255,7 +258,7 @@ class TradingRuntime:
             raise RuntimeError('operator lifecycle commands must run outside callbacks')
 
     async def _manual_event(self, message: Message) -> None:
-        if not isinstance(message, (OrderUpdated, ExecutionApplied, PositionChanged)):
+        if not isinstance(message, (OrderUpdated, ExecutionApplied, PositionChanged, DeficitUpdated)):
             raise ValueError('unexpected manual inventory event')
         # Durable finance is already in OMS/ledger. This system owner neither
         # receives market callbacks nor originates trading decisions.
@@ -298,7 +301,7 @@ class TradingRuntime:
         await self.orders.handle(CancelOrder(MANUAL, order_id))
         await self.bus.drain()
 
-    async def _plan_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan | AcknowledgePlan) -> None:
+    async def _risk_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan | AcknowledgePlan | DeficitCommand) -> None:
         self._check_operator_call()
         await self.bus.drain()
         self._check_operator_call()
@@ -306,19 +309,31 @@ class TradingRuntime:
         await self.bus.drain()
 
     async def close_plan(self, plan_id: str) -> None:
-        await self._plan_operator(ClosePlan(self.orders.plan(plan_id).plan.strategy_id, plan_id))
+        await self._risk_operator(ClosePlan(self.orders.plan(plan_id).plan.strategy_id, plan_id))
 
     async def mark_plan(self, marks: PlanMarks) -> None:
-        await self._plan_operator(marks)
+        await self._risk_operator(marks)
 
     async def check_plan_deadlines(self) -> None:
-        await self._plan_operator(CheckPlanDeadlines())
+        await self._risk_operator(CheckPlanDeadlines())
 
     async def retry_plan(self, command: RetryPlan) -> None:
-        await self._plan_operator(command)
+        await self._risk_operator(command)
 
     async def acknowledge_plan(self, command: AcknowledgePlan) -> None:
-        await self._plan_operator(command)
+        await self._risk_operator(command)
+
+    async def start_deficit(self, command: StartDeficit) -> None:
+        await self._risk_operator(command)
+
+    async def check_deficits(self) -> None:
+        await self._risk_operator(CheckDeficits())
+
+    async def retry_deficit(self, command: RetryDeficit) -> None:
+        await self._risk_operator(command)
+
+    async def acknowledge_deficit(self, command: AcknowledgeDeficit) -> None:
+        await self._risk_operator(command)
 
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         self._check_operator_call()

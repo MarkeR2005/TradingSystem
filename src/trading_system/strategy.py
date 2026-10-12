@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 
 from .domain import (
     Candle, CancelOrder, EquityPoint, Execution, InstrumentId, OrderIntent,
-    OrderSnapshot, OwnershipSettlement, PlanUpdated, Position, PositionChanged, ReplaceOrder, Route, SubmitOrder, Trade,
+    OrderSnapshot, OwnershipSettlement, DeficitUpdated, PlanUpdated, Position, PositionChanged, ReplaceOrder, Route, SubmitOrder, Trade,
 )
 from .events import EventBus
 from .ledger import PositionLedger
@@ -156,4 +156,8 @@ class AutoStrategy(ABC):
 
     async def on_plan(self, context: StrategyContext, update: PlanUpdated) -> None:
         """Progress and durable alerts; plan execution does not depend on this callback."""
+        pass
+
+    async def on_deficit(self, context: StrategyContext, update: DeficitUpdated) -> None:
+        """Durable account-risk status; reduction does not depend on this callback."""
         pass

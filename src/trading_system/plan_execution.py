@@ -94,7 +94,8 @@ class PlanBook:
     async def handle(self, oms: 'OrderManager', message: Message) -> None:
         if isinstance(message, SubmitPlan):
             spec = message.plan
-            if (spec.strategy_id == MANUAL or self.active(spec.strategy_id) or self.paused(spec.strategy_id)
+            if (spec.strategy_id == MANUAL or self.active(spec.strategy_id) or oms.strategy_paused(spec.strategy_id)
+                    or any(oms._deficits.owns_route(leg.intent.route) for leg in spec.legs)
                     or any(owner == spec.strategy_id for owner, _ in oms.ledger.positions())
                     or any(not o.status.terminal or o.order_id in oms._cancellations
                            for o in oms.orders(spec.strategy_id))):
@@ -223,13 +224,16 @@ class PlanBook:
                 elif failed:
                     await self._save(oms, replace(self._alert(oms, state, 'exit leg failed; explicit retry required'),
                                                   phase=PlanPhase.BLOCKED))
-            elif state.phase is PlanPhase.BLOCKED and self._flat(oms, state) and not self._orders(oms, state):
+            elif state.phase in (PlanPhase.BLOCKED, PlanPhase.HELD) and self._flat(oms, state) and not self._orders(oms, state):
                 await self._save(oms, replace(state, phase=PlanPhase.CLOSED))
             state = self.states[plan_id]
             if state.phase is PlanPhase.CANCELLING and not self._orders(oms, state):
                 await self._recover(oms, state)
 
     async def _recover(self, oms: 'OrderManager', state: PlanSnapshot) -> None:
+        if state.goal is FailurePolicy.COMPLETE and oms._deficits.paused(state.plan.strategy_id):
+            state = replace(self._alert(oms, state, 'account deficit prevents automatic completion'),
+                            goal=FailurePolicy.PROTECT)
         if state.goal is FailurePolicy.PROTECT:
             await self._save(oms, replace(state, phase=PlanPhase.CLOSED if self._flat(oms, state) else PlanPhase.HELD))
             return

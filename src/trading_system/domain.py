@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .plans import PlanCommand
+    from .deficit import DeficitCommand
 
 
 def utc(value: datetime) -> datetime:
@@ -347,9 +348,18 @@ class PlanUpdated:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class DeficitUpdated:
+    case_id: str
+    strategy_id: str
+    phase: str
+    paused: bool
+    reason: str
+
+
 type Message = (
     CandleReceived | CandleCorrected | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
     | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied | PositionChanged
-    | PlanCommand | PlanUpdated
+    | PlanCommand | PlanUpdated | DeficitCommand | DeficitUpdated
 )

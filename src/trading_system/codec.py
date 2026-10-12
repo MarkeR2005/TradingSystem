@@ -11,6 +11,7 @@ from .domain import (
     OrderSnapshot, OrderStatus, ReplaceOrder, Route, Side, SubmitOrder,
 )
 from .persistence import JournalError
+from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy,
                     PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan)
 from .inventory import BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition
@@ -21,6 +22,7 @@ from .admission import (
 from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
 
 _TYPES = {cls.__name__: cls for cls in (
+    AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit,
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan,
     BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition,
     AccountCapital, AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital,

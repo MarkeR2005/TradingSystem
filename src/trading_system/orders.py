@@ -23,6 +23,8 @@ from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, T
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
+from .deficit_execution import DeficitBook
+from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitSnapshot, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks,
                     PlanSnapshot, RetryPlan, SubmitPlan)
 
@@ -63,6 +65,7 @@ class OrderManager:
         self._transition_lock = asyncio.Lock()
         self._revision = 0
         self._plans = PlanBook()
+        self._deficits = DeficitBook()
         self._inventory_operations: dict[str, InventoryCommand] = {}
         self._inventory_gateways: dict[str, datetime] = {}
         self._inventory_cutoffs: dict[str, datetime] = {}
@@ -98,6 +101,7 @@ class OrderManager:
 
     def _copy_state(self, candidate: 'OrderManager') -> None:
         candidate._plans = self._plans.fork()
+        candidate._deficits = self._deficits.fork()
         candidate._revision = self._revision
         candidate._inventory_operations = self._inventory_operations.copy()
         candidate._inventory_gateways = self._inventory_gateways.copy()
@@ -118,6 +122,7 @@ class OrderManager:
 
     def _adopt(self, candidate: 'OrderManager') -> None:
         self._plans = candidate._plans
+        self._deficits = candidate._deficits
         self._revision = candidate._revision
         self._inventory_operations = candidate._inventory_operations
         self._inventory_gateways = candidate._inventory_gateways
@@ -153,7 +158,7 @@ class OrderManager:
     async def _transition(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
         if self._failed_after_commit:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
-        if self._plans.duplicate(message):
+        if self._plans.duplicate(message) or self._deficits.duplicate(message):
             return
         if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             previous = self._inventory_operations.get(message.operation_id)
@@ -161,7 +166,8 @@ class OrderManager:
                 if previous != message:
                     raise ValueError('operation identifier has conflicting contents')
                 return
-        if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual, SubmitPlan, RetryPlan, AcknowledgePlan)) and not self.ready:
+        if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual, SubmitPlan, RetryPlan, AcknowledgePlan,
+                                StartDeficit, RetryDeficit, AcknowledgeDeficit)) and not self.ready:
             raise RuntimeError('trading is blocked until storage, capital and gateway reconciliation are ready')
         generated: list[str] = []
 
@@ -284,6 +290,8 @@ class OrderManager:
         self._capital_refreshed = False
 
     async def _inventory_report(self, command: InventoryReport) -> None:
+        if self._deficits.active() is not None and (command.openings or command.imports):
+            raise ValueError('new inventory must wait until deficit recovery is acknowledged')
         gateway = command.gateway_id
         previous_time = self._inventory_gateways.get(gateway)
         if (gateway not in self.gateway_ids or command.as_of > self.clock.now()
@@ -339,6 +347,9 @@ class OrderManager:
             self._invalidate_allocation()
 
     async def _transfer_position(self, command: TransferPosition) -> None:
+        if (self._deficits.paused(command.source_id) or self._deficits.paused(command.target_id)
+                or self._deficits.owns_route(command.route)):
+            raise ValueError('deficit recovery locks affected ownership')
         if self._plans.active(command.source_id) or self._plans.active(command.target_id):
             raise ValueError('finish active plans before transferring ownership')
         if self._unreconciled or self._storage_blocked:
@@ -359,6 +370,8 @@ class OrderManager:
         self._invalidate_allocation()
 
     async def _close_manual(self, command: CloseManual) -> None:
+        if self._deficits.owns_route(command.route):
+            raise ValueError('deficit recovery owns affected manual exits')
         position = self.ledger.position(MANUAL, command.route)
         side = Side.SELL if position.quantity > 0 else Side.BUY
         active = [o for o in self.orders(MANUAL) if o.intent.route == command.route and not o.status.terminal]
@@ -373,6 +386,9 @@ class OrderManager:
         if order.status is OrderStatus.REJECTED:
             raise ValueError(order.rejection_reason)
 
+    def deficit(self, case_id: str) -> DeficitSnapshot:
+        return self._deficits.states[case_id]
+
     def plan(self, plan_id: str) -> PlanSnapshot:
         return self._plans.states[plan_id]
 
@@ -380,7 +396,7 @@ class OrderManager:
         return self._plans.active(owner)
 
     def strategy_paused(self, owner: str) -> bool:
-        return self._plans.paused(owner)
+        return self._plans.paused(owner) or self._deficits.paused(owner)
 
     def _batch_error(self, owner: str, intents: tuple[OrderIntent, ...]) -> str | None:
         previous = self._orders
@@ -400,7 +416,9 @@ class OrderManager:
         return None
 
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
-        if isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan, AcknowledgePlan)):
+        if isinstance(message, (StartDeficit, RetryDeficit, AcknowledgeDeficit, CheckDeficits)):
+            await self._deficits.handle(self, message)
+        elif isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan, AcknowledgePlan)):
             await self._plans.handle(self, message)
         elif isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             if message.expected_revision != self._revision:
@@ -431,14 +449,17 @@ class OrderManager:
                 for order_id in tuple(self._cancellations):
                     await self._finish_cancel(order_id)
         elif isinstance(message, SubmitOrder):
-            if self._plans.active(message.strategy_id) or self._plans.paused(message.strategy_id):
+            if self._plans.active(message.strategy_id) or self.strategy_paused(message.strategy_id):
                 raise ValueError('plan owns trading actions until its cycle and alerts are resolved')
+            if self._deficits.owns_route(message.intent.route):
+                raise ValueError('deficit recovery locks new orders on affected routes')
             if message.strategy_id == MANUAL:
                 raise ValueError('manual strategy accepts only explicit bounded close commands')
             await self._new_order(message.strategy_id, message.intent)
         elif isinstance(message, (CancelOrder, ReplaceOrder)):
             if isinstance(message, ReplaceOrder) and (self._plans.active(message.strategy_id)
-                                                     or self._plans.paused(message.strategy_id)):
+                                                     or self.strategy_paused(message.strategy_id)
+                                                     or self._deficits.owns_route(message.intent.route)):
                 raise ValueError('individual plan orders cannot be replaced')
             await self._request_cancel(message)
         elif isinstance(message, GatewayAccepted):
@@ -452,6 +473,7 @@ class OrderManager:
         else:
             raise ValueError('unexpected order-manager message')
         await self._plans.advance(self, message)
+        await self._deficits.advance(self, message)
 
     @property
     def capital_policy(self) -> CapitalPolicy | None:
@@ -742,6 +764,8 @@ class OrderManager:
         instrument = order.intent.route.instrument
         if not instrument.quantities_equal(order.filled_quantity, pending.acknowledgement.filled_quantity):
             return
+        if self._deficits.paused(order.strategy_id) or self._deficits.owns_route(order.intent.route):
+            pending.replacement = None
         intent = pending.replacement
         needs_child = (intent is not None and intent.quantity > order.filled_quantity
                        and not instrument.quantities_equal(intent.quantity, order.filled_quantity))
