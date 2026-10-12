@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -55,3 +55,5 @@ jobs:
         run: python examples/v2_manual.py
       - name: Multi-leg plan and failure policy demonstration
         run: python examples/v2_plans.py
+      - name: Account deficit reduction and recovery demonstration
+        run: python examples/v2_deficit.py
