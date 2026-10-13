@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any
 
 from .domain import (
-    CancelOrder, Execution, GatewayAccepted, GatewayCancelled, GatewayCancelRejected,
+    CancelOrder, Execution, GatewayAccepted, GatewayCancel, GatewayCancelled, GatewayCancelRejected, GatewaySubmit,
     GatewayRejected, GatewayReconciled, GatewayUncertain, Instrument, InstrumentId, OrderIntent,
     OrderSnapshot, OrderStatus, ReplaceOrder, Route, Side, SubmitOrder,
 )
@@ -30,7 +30,7 @@ _TYPES = {cls.__name__: cls for cls in (
     AccountCapital, AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital,
     AccountKey, AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
     InstrumentId, Instrument, Route, OrderIntent, OrderSnapshot, SubmitOrder, CancelOrder, ReplaceOrder,
-    GatewayAccepted, GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewayReconciled, GatewayUncertain, Execution,
+    GatewaySubmit, GatewayCancel, GatewayAccepted, GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewayReconciled, GatewayUncertain, Execution,
 )}
 
 

@@ -71,6 +71,10 @@ class DurableJournal:
         return self._stream is not None and not self._failed
 
     @property
+    def record_count(self) -> int:
+        return len(self._entries)
+
+    @property
     def records(self) -> tuple[dict[str, Any], ...]:
         # JSON copies prevent callers mutating canonical records.
         return tuple(json.loads(canonical(entry['payload'])) for entry in self._entries)
