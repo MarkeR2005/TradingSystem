@@ -1,0 +1,237 @@
+{
+  "description": "Synthetic fixtures derived from the pinned quik-python raw callback schema; not captured broker data.",
+  "events": [
+    {
+      "stage": "submit",
+      "event": "OnTransReply",
+      "data": {
+        "trans_id": 1,
+        "status": 0
+      }
+    },
+    {
+      "stage": "submit",
+      "event": "OnTrade",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "order_num": 9007199254740993,
+        "trade_num": 9007199254740994,
+        "qty": 1,
+        "price": 100,
+        "flags": 0,
+        "broker_comission": "1",
+        "datetime": {
+          "year": 2026,
+          "month": 1,
+          "day": 1,
+          "hour": 13,
+          "min": 0,
+          "sec": 0,
+          "ms": 0,
+          "mcs": 0
+        }
+      }
+    },
+    {
+      "stage": "submit",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 1,
+        "order_num": 9007199254740993,
+        "qty": 4,
+        "balance": 3,
+        "price": 100,
+        "flags": 9
+      }
+    },
+    {
+      "stage": "replace",
+      "event": "OnTransReply",
+      "data": {
+        "trans_id": 2,
+        "status": 3,
+        "order_num": 9007199254740993
+      }
+    },
+    {
+      "stage": "replace",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 1,
+        "order_num": 9007199254740993,
+        "qty": 4,
+        "balance": 2,
+        "price": 100,
+        "flags": 10
+      }
+    },
+    {
+      "stage": "replace",
+      "event": "OnTrade",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "order_num": 9007199254740993,
+        "trade_num": 9007199254740995,
+        "qty": 1,
+        "price": 100,
+        "flags": 0,
+        "broker_comission": "1",
+        "datetime": {
+          "year": 2026,
+          "month": 1,
+          "day": 1,
+          "hour": 13,
+          "min": 0,
+          "sec": 0,
+          "ms": 0,
+          "mcs": 0
+        }
+      }
+    },
+    {
+      "stage": "child",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 3,
+        "order_num": 9007199254740996,
+        "qty": 2,
+        "balance": 2,
+        "price": 99,
+        "flags": 9
+      }
+    },
+    {
+      "stage": "child",
+      "event": "OnTrade",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "order_num": 9007199254740996,
+        "trade_num": 9007199254740997,
+        "qty": 2,
+        "price": 99,
+        "flags": 0,
+        "broker_comission": "1",
+        "datetime": {
+          "year": 2026,
+          "month": 1,
+          "day": 1,
+          "hour": 13,
+          "min": 0,
+          "sec": 0,
+          "ms": 0,
+          "mcs": 0
+        }
+      }
+    },
+    {
+      "stage": "child",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 3,
+        "order_num": 9007199254740996,
+        "qty": 2,
+        "balance": 0,
+        "price": 99,
+        "flags": 8
+      }
+    },
+    {
+      "stage": "exit",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 4,
+        "order_num": 9007199254740998,
+        "qty": 4,
+        "balance": 4,
+        "price": 105,
+        "flags": 13
+      }
+    },
+    {
+      "stage": "exit",
+      "event": "OnTrade",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "order_num": 9007199254740998,
+        "trade_num": 9007199254740999,
+        "qty": 4,
+        "price": 105,
+        "flags": 4,
+        "broker_comission": "1",
+        "datetime": {
+          "year": 2026,
+          "month": 1,
+          "day": 1,
+          "hour": 13,
+          "min": 0,
+          "sec": 0,
+          "ms": 0,
+          "mcs": 0
+        }
+      }
+    },
+    {
+      "stage": "exit",
+      "event": "OnOrder",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "trans_id": 4,
+        "order_num": 9007199254740998,
+        "qty": 4,
+        "balance": 0,
+        "price": 105,
+        "flags": 12
+      }
+    },
+    {
+      "stage": "exit",
+      "event": "OnTrade",
+      "data": {
+        "account": "demo",
+        "class_code": "SPBFUT",
+        "sec_code": "TEST",
+        "order_num": 9007199254740993,
+        "trade_num": 9007199254740994,
+        "qty": 1,
+        "price": 100,
+        "flags": 0,
+        "broker_comission": "1",
+        "datetime": {
+          "year": 2026,
+          "month": 1,
+          "day": 1,
+          "hour": 13,
+          "min": 0,
+          "sec": 0,
+          "ms": 0,
+          "mcs": 0
+        }
+      }
+    }
+  ]
+}

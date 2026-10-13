@@ -7,7 +7,7 @@ from typing import Any
 
 from .domain import (
     CancelOrder, Execution, GatewayAccepted, GatewayCancelled, GatewayCancelRejected,
-    GatewayRejected, GatewayReconciled, Instrument, InstrumentId, OrderIntent,
+    GatewayRejected, GatewayReconciled, GatewayUncertain, Instrument, InstrumentId, OrderIntent,
     OrderSnapshot, OrderStatus, ReplaceOrder, Route, Side, SubmitOrder,
 )
 from .persistence import JournalError
@@ -30,7 +30,7 @@ _TYPES = {cls.__name__: cls for cls in (
     AccountCapital, AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital,
     AccountKey, AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
     InstrumentId, Instrument, Route, OrderIntent, OrderSnapshot, SubmitOrder, CancelOrder, ReplaceOrder,
-    GatewayAccepted, GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewayReconciled, Execution,
+    GatewayAccepted, GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewayReconciled, GatewayUncertain, Execution,
 )}
 
 

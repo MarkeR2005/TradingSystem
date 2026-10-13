@@ -10,7 +10,7 @@ from uuid import uuid4
 from .domain import (
     CancelOrder, Execution, ExecutionApplied, GatewayAccepted, GatewayCancel,
     GatewayCancelled, GatewayCancelRejected, GatewayRejected, GatewaySubmit,
-    GatewayReconciled, Message, OrderIntent, OrderSnapshot, OrderStatus, OrderUpdated, ReplaceOrder,
+    GatewayReconciled, GatewayUncertain, Message, OrderIntent, OrderSnapshot, OrderStatus, OrderUpdated, ReplaceOrder,
     SubmitOrder, Route, Side, PositionChanged,
 )
 from . import codec
@@ -249,8 +249,8 @@ class OrderManager:
         candidate._capital_required |= self._capital_required
         self._adopt(candidate)
         self._capital_refreshed = not self._capital_required
-        self._unreconciled = {o.intent.route.instrument.id.gateway_id for o in self._orders.values()
-                             if o.order_id not in self._local_rejections} | set(self._inventory_gateways)
+        self._unreconciled |= {o.intent.route.instrument.id.gateway_id for o in self._orders.values()
+                              if o.order_id not in self._local_rejections} | set(self._inventory_gateways)
         if latest is not None and isinstance(self.clock, ManualClock) and self.clock.now() < latest:
             self.clock.advance_to(latest)
 
@@ -447,6 +447,12 @@ class OrderManager:
             if self.ready:
                 for order_id in tuple(self._cancellations):
                     await self._finish_cancel(order_id)
+        elif isinstance(message, GatewayUncertain):
+            if message.gateway_id not in self.gateway_ids:
+                raise ValueError("unknown gateway uncertainty")
+            self._unreconciled.add(message.gateway_id)
+            self._capital_required = True
+            self._capital_refreshed = False
         elif isinstance(message, GatewayReconciled):
             self._validate_reconciliation(message.gateway_id, message.observed)
             if message.gateway_id not in self._inventory_gateways:

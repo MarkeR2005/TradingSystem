@@ -339,6 +339,18 @@ class GatewayReconciled:
 
 
 @dataclass(frozen=True)
+class GatewayUncertain:
+    """A connection gap or ambiguous outcome requires reconciliation, never a synthetic rejection."""
+
+    gateway_id: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if not self.gateway_id or not self.reason:
+            raise ValueError('gateway uncertainty requires an identifier and reason')
+
+
+@dataclass(frozen=True)
 class PlanUpdated:
     plan_id: str
     strategy_id: str
@@ -360,6 +372,6 @@ class DeficitUpdated:
 type Message = (
     CandleReceived | CandleCorrected | SubmitOrder | CancelOrder | ReplaceOrder | GatewaySubmit
     | GatewayAccepted | GatewayCancel | GatewayCancelled | GatewayCancelRejected
-    | GatewayRejected | GatewayReconciled | OrderUpdated | Execution | ExecutionApplied | PositionChanged
+    | GatewayRejected | GatewayReconciled | GatewayUncertain | OrderUpdated | Execution | ExecutionApplied | PositionChanged
     | PlanCommand | PlanUpdated | DeficitCommand | DeficitUpdated
 )
