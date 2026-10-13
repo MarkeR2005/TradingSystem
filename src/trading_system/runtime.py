@@ -26,7 +26,7 @@ from .simulation import Gateway
 from .strategy import AutoStrategy, StrategyContext
 from .time import ManualClock
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitCommand, RetryDeficit, StartDeficit
-from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan, UpdatePlanProtection
+from .plans import AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks, RetryPlan, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection
 
 
 class _StrategyRunner:
@@ -258,7 +258,7 @@ class TradingRuntime:
             raise RuntimeError('operator lifecycle commands must run outside callbacks')
 
     async def _manual_event(self, message: Message) -> None:
-        if not isinstance(message, (OrderUpdated, ExecutionApplied, PositionChanged, DeficitUpdated)):
+        if not isinstance(message, (OrderUpdated, ExecutionApplied, PositionChanged, DeficitUpdated, PlanUpdated)):
             raise ValueError('unexpected manual inventory event')
         # Durable finance is already in OMS/ledger. This system owner neither
         # receives market callbacks nor originates trading decisions.
@@ -302,7 +302,7 @@ class TradingRuntime:
         await self.bus.drain()
 
     async def _risk_operator(self, command: ClosePlan | PlanMarks | CheckPlanDeadlines | RetryPlan
-                             | AcknowledgePlan | UpdatePlanProtection | DeficitCommand) -> None:
+                             | AcknowledgePlan | UpdatePlanProtection | ProtectPositions | ReleasePositionProtection | DeficitCommand) -> None:
         self._check_operator_call()
         await self.bus.drain()
         self._check_operator_call()
@@ -311,6 +311,18 @@ class TradingRuntime:
 
     async def close_plan(self, plan_id: str) -> None:
         await self._risk_operator(ClosePlan(self.orders.plan(plan_id).plan.strategy_id, plan_id))
+
+    async def protect_positions(self, command: ProtectPositions) -> None:
+        self._check_operator_call()
+        if command.strategy_id != MANUAL:
+            runner = self._strategies.get(command.strategy_id)
+            if runner is None or any(p.route.instrument.id not in runner.strategy.instruments
+                                     for p in command.marks.prices):
+                raise ValueError('protection owner must be loaded and declare its instruments')
+        await self._risk_operator(command)
+
+    async def release_position_protection(self, command: ReleasePositionProtection) -> None:
+        await self._risk_operator(command)
 
     async def update_plan_protection(self, command: UpdatePlanProtection) -> None:
         await self._risk_operator(command)

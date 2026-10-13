@@ -14,7 +14,7 @@ from .persistence import JournalError
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy,
                     PlanLeg, PlanMarks, PlanPrice, PlanProtection, RetryPlan, SubmitPlan, TradePlan,
-                    TrailingStop, UpdatePlanProtection)
+                    TrailingStop, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection)
 from .inventory import BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition
 from .capital import AccountCapital, AccountKey
 from .admission import (
@@ -23,7 +23,7 @@ from .admission import (
 from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
 
 _TYPES = {cls.__name__: cls for cls in (
-    PlanProtection, TrailingStop, UpdatePlanProtection,
+    PlanProtection, TrailingStop, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection,
     AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit,
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan,
     BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition,

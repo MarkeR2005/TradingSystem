@@ -448,7 +448,7 @@ class PlanTests(IsolatedAsyncioTestCase):
 
     async def test_invalid_plan_inputs_fail_before_any_order(self):
         spec = plan()
-        for changes in ({'legs': spec.legs[:1]}, {'legs': (spec.legs[0], spec.legs[0])},
+        for changes in ({'legs': ()}, {'legs': (spec.legs[0], spec.legs[0])},
                         {'failure_policy': 'close'}, {'stop_loss': float('nan')},
                         {'stop_loss': 0}, {'recovery_timeout': 1e308}, {'stop_loss': True}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):

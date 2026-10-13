@@ -12,7 +12,7 @@ from .optimization import HistoryRequest, OptimizationFunction, OptimizationHand
 from .state import JsonObject, json_object
 from .orders import OrderManager
 from .time import Clock
-from .plans import ClosePlan, PlanSnapshot, SubmitPlan, TradePlan, UpdatePlanProtection
+from .plans import ClosePlan, PlanSnapshot, SubmitPlan, TradePlan, UpdatePlanProtection, ProtectPositions
 
 
 class StrategyContext:
@@ -62,6 +62,14 @@ class StrategyContext:
     def oms_revision(self) -> int:
         """Current financial revision for commands that require compare-and-set."""
         return self._orders.revision
+
+    async def protect_positions(self, command: ProtectPositions) -> None:
+        if not self._can_trade():
+            raise RuntimeError('strategy is not running')
+        if command.strategy_id != self.strategy_id or any(
+                price.route.instrument.id not in self._instruments for price in command.marks.prices):
+            raise ValueError('protection must belong to this strategy and its declared instruments')
+        await self._bus.publish('orders', command)
 
     async def update_plan_protection(self, command: UpdatePlanProtection) -> None:
         if not self._can_trade():

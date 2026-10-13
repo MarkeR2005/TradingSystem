@@ -9,10 +9,11 @@ from .domain import CancelOrder, Execution, GatewayCancelRejected, Message, Orde
 from .capital import _exact, _number
 from .inventory import MANUAL
 from .protection import evaluate_protection
+from .position_protection import attach, release
 from .plans import (
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolicy, PlanAlert,
     PlanMarks, PlanPhase, PlanPrice, PlanProtection, PlanSnapshot, ProtectionTrigger,
-    RetryPlan, SubmitPlan, UpdatePlanProtection,
+    ProtectPositions, ReleasePositionProtection, RetryPlan, SubmitPlan, UpdatePlanProtection,
 )
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 class PlanBook:
     def __init__(self) -> None:
         self.states: dict[str, PlanSnapshot] = {}
-        self.operations: dict[str, RetryPlan | AcknowledgePlan | UpdatePlanProtection] = {}
+        self.operations: dict[str, RetryPlan | AcknowledgePlan | UpdatePlanProtection | ProtectPositions | ReleasePositionProtection] = {}
         self.waves: dict[str, tuple[str, ...]] = {}
 
     def fork(self) -> 'PlanBook':
@@ -33,7 +34,7 @@ class PlanBook:
         return candidate
 
     def active(self, owner: str) -> bool:
-        return any(s.plan.strategy_id == owner and s.phase is not PlanPhase.CLOSED for s in self.states.values())
+        return any(s.plan.strategy_id == owner and not s.phase.terminal for s in self.states.values())
 
     def paused(self, owner: str) -> bool:
         return any(s.plan.strategy_id == owner and s.paused for s in self.states.values())
@@ -42,10 +43,10 @@ class PlanBook:
         if isinstance(message, SubmitPlan):
             previous = self.states.get(message.plan.plan_id)
             if previous is not None:
-                if previous.plan != message.plan:
+                if previous.plan != message.plan or previous.opening_positions:
                     raise ValueError('plan identifier has conflicting contents')
                 return True
-        if isinstance(message, (RetryPlan, AcknowledgePlan, UpdatePlanProtection)):
+        if isinstance(message, (RetryPlan, AcknowledgePlan, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection)):
             old = self.operations.get(message.operation_id)
             if old is not None:
                 if old != message:
@@ -55,6 +56,8 @@ class PlanBook:
             state = self.states[message.plan_id]
             if state.plan.strategy_id != message.strategy_id:
                 raise ValueError('strategy does not own plan')
+            if state.phase is PlanPhase.RELEASED:
+                raise ValueError('position protection was released')
             return state.close_requested or state.phase is PlanPhase.CLOSED
         return False
 
@@ -94,7 +97,11 @@ class PlanBook:
             await oms._request_cancel(CancelOrder(state.plan.strategy_id, key))
 
     async def handle(self, oms: 'OrderManager', message: Message) -> None:
-        if isinstance(message, SubmitPlan):
+        if isinstance(message, ProtectPositions):
+            await attach(self, oms, message)
+        elif isinstance(message, ReleasePositionProtection):
+            await release(self, oms, message)
+        elif isinstance(message, SubmitPlan):
             spec = message.plan
             if (spec.strategy_id == MANUAL or self.active(spec.strategy_id) or oms.strategy_paused(spec.strategy_id)
                     or any(oms._deficits.owns_route(leg.intent.route) for leg in spec.legs)
@@ -123,6 +130,8 @@ class PlanBook:
             await self._cancel(oms, replace(state, close_requested=True), FailurePolicy.CLOSE)
         elif isinstance(message, PlanMarks):
             state = self.states[message.plan_id]
+            if state.phase is PlanPhase.RELEASED:
+                raise ValueError('position protection was released')
             self._validate_prices(state, message.prices)
             latest = max((e.timestamp for e in oms._executions.values()
                           if e.order_id in state.entry_ids + state.exit_ids), default=message.as_of)
@@ -198,7 +207,11 @@ class PlanBook:
             return
         cash = sum((-e.side.sign * _exact(e.quantity) * _exact(e.price)
                     * _exact(e.route.instrument.contract_multiplier) - _exact(e.commission) for e in fills), Fraction())
-        quantities = {m.route: sum((e.side.sign * _exact(e.quantity) for e in fills if e.route == m.route), Fraction())
+        opening = {p.route: p for p in state.opening_positions}
+        cash += _exact(state.opening_pnl) - sum((_exact(p.quantity) * _exact(p.average_price)
+                    * _exact(p.route.instrument.contract_multiplier) for p in state.opening_positions), Fraction())
+        quantities = {m.route: sum((e.side.sign * _exact(e.quantity) for e in fills if e.route == m.route),
+                                  _exact(opening[m.route].quantity) if m.route in opening else Fraction())
                       for m in marks.prices}
         value = sum((quantities[m.route] * _exact(m.price) * _exact(m.route.instrument.contract_multiplier)
                      for m in marks.prices), Fraction())
@@ -233,6 +246,8 @@ class PlanBook:
     async def advance(self, oms: 'OrderManager', message: object) -> None:
         for plan_id in tuple(self.states):
             state = self.states[plan_id]
+            if state.phase is PlanPhase.RELEASED:
+                continue
             if isinstance(message, Execution) and message.order_id in state.entry_ids + state.exit_ids:
                 await self._evaluate(oms, state)
                 state = self.states[plan_id]
