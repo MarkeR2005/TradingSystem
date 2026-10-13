@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection, rewrite/v2-position-protection]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -61,3 +61,5 @@ jobs:
         run: python examples/v2_protection.py
       - name: Existing position protection and ownership demonstration
         run: python examples/v2_position_protection.py
+      - name: QUIK callback contract replay demonstration
+        run: python examples/v2_quik_contract.py
