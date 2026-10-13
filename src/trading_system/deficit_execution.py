@@ -16,6 +16,7 @@ from .deficit import (
     DeficitQuotes, DeficitSnapshot, ReductionTarget, RetryDeficit, StartDeficit,
 )
 from .domain import CancelOrder, DeficitUpdated, GatewayCancelRejected, OrderIntent, OrderSnapshot, OrderStatus, Route, Side
+from .inventory import MANUAL
 from .plans import FailurePolicy, PlanAlert, PlanPhase
 
 if TYPE_CHECKING:
@@ -65,13 +66,19 @@ class DeficitBook:
         pairs.update((o.strategy_id, o.intent.route) for o in oms._orders.values()
                      if AccountKey.from_route(o.intent.route) == account
                      and (not o.status.terminal or o.order_id in oms._cancellations))
-        groups = []
+        groups: list[DeficitGroup] = []
         for state in sorted(oms._plans.states.values(), key=lambda s: s.plan.plan_id):
-            if state.phase is PlanPhase.CLOSED:
+            if state.phase.terminal:
                 continue
             routes = tuple(leg.intent.route for leg in state.plan.legs)
             if any((state.plan.strategy_id, route) in pairs for route in routes):
-                groups.append(DeficitGroup(state.plan.strategy_id, routes, state.plan.plan_id))
+                if state.plan.strategy_id == MANUAL:
+                    # Shared protection does not declare a basket ratio for
+                    # independent external/manual positions.
+                    groups.extend(DeficitGroup(MANUAL, (route,), state.plan.plan_id)
+                                  for route in routes if (MANUAL, route) in pairs)
+                else:
+                    groups.append(DeficitGroup(state.plan.strategy_id, routes, state.plan.plan_id))
                 pairs.difference_update((state.plan.strategy_id, route) for route in routes)
         groups.extend(DeficitGroup(owner, (route,))
                       for owner, route in sorted(pairs, key=lambda p: (p[0], route_key(p[1]))))

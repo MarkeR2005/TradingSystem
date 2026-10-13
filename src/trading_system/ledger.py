@@ -49,6 +49,11 @@ class PositionLedger:
         account = self._accounts.get(strategy_id)
         return tuple(account.trades) if account else ()
 
+    def open_cycle_pnl(self, strategy_id: str) -> float:
+        """Realized result and fees of the current owner cycle, excluding completed cycles."""
+        account = self._accounts.get(strategy_id)
+        return account.cycle_pnl if account else 0.0
+
     def equity(self, strategy_id: str) -> tuple[EquityPoint, ...]:
         account = self._accounts.get(strategy_id)
         return tuple(account.equity) if account else ()

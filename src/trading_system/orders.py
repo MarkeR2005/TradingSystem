@@ -26,7 +26,7 @@ from .plan_execution import PlanBook
 from .deficit_execution import DeficitBook
 from .deficit import AcknowledgeDeficit, CheckDeficits, DeficitSnapshot, RetryDeficit, StartDeficit
 from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanMarks,
-                    PlanSnapshot, RetryPlan, SubmitPlan, UpdatePlanProtection)
+                    PlanSnapshot, ProtectPositions, ReleasePositionProtection, RetryPlan, SubmitPlan, UpdatePlanProtection)
 
 
 def strategy_recipient(strategy_id: str) -> str:
@@ -167,7 +167,8 @@ class OrderManager:
                     raise ValueError('operation identifier has conflicting contents')
                 return
         if isinstance(message, (SubmitOrder, ReplaceOrder, CloseManual, SubmitPlan, RetryPlan, AcknowledgePlan,
-                                StartDeficit, RetryDeficit, AcknowledgeDeficit, UpdatePlanProtection)) and not self.ready:
+                                StartDeficit, RetryDeficit, AcknowledgeDeficit, UpdatePlanProtection,
+                                ProtectPositions, ReleasePositionProtection)) and not self.ready:
             raise RuntimeError('trading is blocked until storage, capital and gateway reconciliation are ready')
         generated: list[str] = []
 
@@ -292,6 +293,8 @@ class OrderManager:
     async def _inventory_report(self, command: InventoryReport) -> None:
         if self._deficits.active() is not None and (command.openings or command.imports):
             raise ValueError('new inventory must wait until deficit recovery is acknowledged')
+        if self._plans.active(MANUAL) and (command.openings or command.imports):
+            raise ValueError('release or close manual protection before importing new inventory')
         gateway = command.gateway_id
         previous_time = self._inventory_gateways.get(gateway)
         if (gateway not in self.gateway_ids or command.as_of > self.clock.now()
@@ -370,6 +373,8 @@ class OrderManager:
         self._invalidate_allocation()
 
     async def _close_manual(self, command: CloseManual) -> None:
+        if self._plans.active(MANUAL):
+            raise ValueError('use ClosePlan or release manual protection before a partial close')
         if self._deficits.owns_route(command.route):
             raise ValueError('deficit recovery owns affected manual exits')
         position = self.ledger.position(MANUAL, command.route)
@@ -419,7 +424,7 @@ class OrderManager:
         if isinstance(message, (StartDeficit, RetryDeficit, AcknowledgeDeficit, CheckDeficits)):
             await self._deficits.handle(self, message)
         elif isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan,
-                                  AcknowledgePlan, UpdatePlanProtection)):
+                                  AcknowledgePlan, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection)):
             await self._plans.handle(self, message)
         elif isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
             if message.expected_revision != self._revision:

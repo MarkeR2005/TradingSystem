@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from fractions import Fraction
 
-from .domain import OrderIntent, Route, finite, positive, utc
+from .domain import OrderIntent, Position, Route, finite, positive, utc
 
 
 class FailurePolicy(str, Enum):
@@ -23,6 +23,11 @@ class PlanPhase(str, Enum):
     CLOSING = 'closing'
     BLOCKED = 'blocked'
     CLOSED = 'closed'
+    RELEASED = 'released'
+
+    @property
+    def terminal(self) -> bool:
+        return self in (PlanPhase.CLOSED, PlanPhase.RELEASED)
 
 
 def name(value: str) -> None:
@@ -107,8 +112,8 @@ class TradePlan:
             raise ValueError('plan must declare a failure policy')
         if not isinstance(self.legs, tuple) or not all(isinstance(leg, PlanLeg) for leg in self.legs):
             raise ValueError('plan requires immutable typed legs')
-        if len(self.legs) < 2 or len({leg.intent.route for leg in self.legs}) != len(self.legs):
-            raise ValueError('plan requires at least two distinct routes')
+        if not self.legs or len({leg.intent.route for leg in self.legs}) != len(self.legs):
+            raise ValueError('plan requires at least one distinct route')
         object.__setattr__(self, 'expires_at', utc(self.expires_at))
         if isinstance(self.stop_loss, bool) or isinstance(self.recovery_timeout, bool):
             raise ValueError('plan risk limits must be numeric, not bool')
@@ -227,6 +232,44 @@ class UpdatePlanProtection:
 
 
 @dataclass(frozen=True)
+class ProtectPositions:
+    """Attach one protection group to all settled positions of an owner; no entry orders."""
+
+    operation_id: str
+    expected_revision: int
+    strategy_id: str
+    marks: PlanMarks
+    protection: PlanProtection
+    exit_prices: tuple[PlanPrice, ...]
+    order_timeout: float = 30
+
+    def __post_init__(self) -> None:
+        operation(self.operation_id, self.expected_revision)
+        name(self.strategy_id)
+        if not isinstance(self.marks, PlanMarks) or not isinstance(self.protection, PlanProtection):
+            raise ValueError('position protection requires typed marks and policy')
+        prices(self.exit_prices)
+        if isinstance(self.order_timeout, bool):
+            raise ValueError('order timeout must be numeric, not bool')
+        positive(self.order_timeout, 'protection order timeout')
+
+
+@dataclass(frozen=True)
+class ReleasePositionProtection:
+    """Explicitly remove an untriggered attached protection before changing ownership."""
+
+    operation_id: str
+    expected_revision: int
+    strategy_id: str
+    plan_id: str
+
+    def __post_init__(self) -> None:
+        operation(self.operation_id, self.expected_revision)
+        name(self.strategy_id)
+        name(self.plan_id)
+
+
+@dataclass(frozen=True)
 class PlanAlert:
     timestamp: datetime
     reason: str
@@ -250,6 +293,8 @@ class PlanSnapshot:
     protection: PlanProtection | None = None
     peak_pnl: Fraction | None = None
     protection_trigger: ProtectionTrigger | None = None
+    opening_positions: tuple[Position, ...] = ()
+    opening_pnl: float = 0
 
 
-type PlanCommand = SubmitPlan | ClosePlan | CheckPlanDeadlines | PlanMarks | RetryPlan | AcknowledgePlan | UpdatePlanProtection
+type PlanCommand = SubmitPlan | ClosePlan | CheckPlanDeadlines | PlanMarks | RetryPlan | AcknowledgePlan | UpdatePlanProtection | ProtectPositions | ReleasePositionProtection
