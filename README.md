@@ -2,7 +2,8 @@
 
 > Разработка v2: [запуск и первая итерация](docs/v2/README.md),
 > [архитектурный эскиз](docs/v2/architecture.md),
-> [согласованный план XP/TDD](docs/v2/development-plan.md).
+> [согласованный план XP/TDD](docs/v2/development-plan.md),
+> [первое подключение демо QUIK — только чтение](docs/v2/quik-readonly-check.md).
 > Текст ниже описывает исходный прототип.
 
 ## 1. Идейная основа и цели

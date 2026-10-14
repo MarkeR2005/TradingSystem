@@ -1,6 +1,6 @@
-# TradingSystem v2: офлайн-ядро
+# TradingSystem v2: ядро и подключение QUIK
 
-Разрабатывается управляемая офлайн-симуляция. Работает цепочка: завершённая свеча → стратегия → намерение → подтверждение/исполнение → позиция → закрытая сделка → эквити. Во второй итерации добавлены лимитная цена, отмена, замена и гонки исполнения с отменой. Третья добавляет надёжный журнал, SQLite-проекцию, восстановление учёта и запрет торговли до сверки. Четвёртая — pause/resume, checkpoints стратегии и `OPTIMIZING` с отдельным CPU-процессом. Пятая — общая история завершённых свечей, прогрев, synthetic/correction и первоначальный одиночный бэктест. Шестая — промежуточная проверка, исправления очередей/хранения и первый планировщик капитала по снимкам счетов. Седьмая — допуски маршрутов, атомарные резервы OMS и их восстановление. Восьмая связывает снимки источника и текущую занятость OMS с пересчётом бюджетов. Девятая добавляет сверку внешних позиций/заявок, ручного владельца, частичную передачу и лимитное закрытие без фиктивных fills. Десятая — групповые планы, атомарный допуск, три политики сбоя ноги и локальная защита совокупного исполненного P&L. Одиннадцатая — ожидание и пропорциональное сокращение внешнего дефицита с отменами, ограниченными повторными попытками и восстановлением. Двенадцатая добавляет TP/trailing, сохранение максимума P&L и изменение параметров защиты открытого плана. Тринадцатая защищает одиночные входы и существующие обычные/manual-позиции, завершая базовую офлайн-часть этапа 6. Четырнадцатая начинает этап 7: строгий контракт QUIK, replay брокерских callbacks и блокировка неопределённых исходов. Пятнадцатая сохраняет идентификаторы и callbacks в отдельном журнале шлюза, восстанавливает доставку в OMS без повторной подготовки заявок.
+Разрабатывается управляемая офлайн-симуляция. Работает цепочка: завершённая свеча → стратегия → намерение → подтверждение/исполнение → позиция → закрытая сделка → эквити. Во второй итерации добавлены лимитная цена, отмена, замена и гонки исполнения с отменой. Третья добавляет надёжный журнал, SQLite-проекцию, восстановление учёта и запрет торговли до сверки. Четвёртая — pause/resume, checkpoints стратегии и `OPTIMIZING` с отдельным CPU-процессом. Пятая — общая история завершённых свечей, прогрев, synthetic/correction и первоначальный одиночный бэктест. Шестая — промежуточная проверка, исправления очередей/хранения и первый планировщик капитала по снимкам счетов. Седьмая — допуски маршрутов, атомарные резервы OMS и их восстановление. Восьмая связывает снимки источника и текущую занятость OMS с пересчётом бюджетов. Девятая добавляет сверку внешних позиций/заявок, ручного владельца, частичную передачу и лимитное закрытие без фиктивных fills. Десятая — групповые планы, атомарный допуск, три политики сбоя ноги и локальная защита совокупного исполненного P&L. Одиннадцатая — ожидание и пропорциональное сокращение внешнего дефицита с отменами, ограниченными повторными попытками и восстановлением. Двенадцатая добавляет TP/trailing, сохранение максимума P&L и изменение параметров защиты открытого плана. Тринадцатая защищает одиночные входы и существующие обычные/manual-позиции, завершая базовую офлайн-часть этапа 6. Четырнадцатая начинает этап 7: строгий контракт QUIK, replay брокерских callbacks и блокировка неопределённых исходов. Пятнадцатая сохраняет идентификаторы и callbacks в отдельном журнале шлюза, восстанавливает доставку в OMS без повторной подготовки заявок. Шестнадцатая добавляет ограниченный read-only транспорт, два диагностических чтения таблиц и команду проверки демо-терминала.
 
 Документы разделены по назначению:
 
@@ -24,53 +24,60 @@
 - [Результат тринадцатой итерации](iteration-13.md): одиночные/manual-позиции, явное снятие защиты, частичная передача и восстановление.
 - [Результат четырнадцатой итерации](iteration-14.md): QUIK-контракт, ранние/поздние callbacks и таймаут без потери резерва.
 - [Результат пятнадцатой итерации](iteration-15.md): durable QUIK, восстановление идентификаторов и доставки callbacks.
-- [Подготовка Windows и QUIK](quik-environment.md): текущий replay, параметры терминала и границы следующего live-среза.
+- [Результат шестнадцатой итерации](iteration-16.md): read-only TCP, Lua-защита, снимки и диагностика.
+- [Подготовка Windows и QUIK](quik-environment.md): подтверждённые контуры demo/ПСБ и параметры среды.
+- [Первое подключение демо QUIK](quik-readonly-check.md): пошаговый запуск Lua bridge и команды диагностики.
 
-## Запуск без дополнительных библиотек
+## Запуск примеров и тестов
 
-Нужен Python 3.12 или новее. Команды выполняются из корня репозитория. Исходный прототип в `core/` и `gui/` имеет собственные зависимости и не участвует в новом запуске.
+Нужен Python 3.12 или новее. Ядро и Python-клиент используют стандартную библиотеку. Полный набор тестов требует dev-зависимостей, включая Lupa 2.6 для проверки Lua 5.4: предварительно установите `python -m pip install -e ".[dev]"` в своём виртуальном окружении. Команды выполняются из корня репозитория и тем же Python. Исходный прототип в `core/` и `gui/` имеет собственные зависимости и не участвует в новом запуске.
 
 Linux/macOS:
 
 ```sh
-PYTHONPATH=src python3 -m unittest discover -s tests_v2 -v
-PYTHONPATH=src python3 examples/v2_round_trip.py
-PYTHONPATH=src python3 examples/v2_cancel_replace.py
-PYTHONPATH=src python3 examples/v2_recovery.py
-PYTHONPATH=src python3 examples/v2_optimization.py
-PYTHONPATH=src python3 examples/v2_backtest.py
-PYTHONPATH=src python3 examples/v2_capital.py
-PYTHONPATH=src python3 examples/v2_reservations.py
-PYTHONPATH=src python3 examples/v2_rebalance.py
-PYTHONPATH=src python3 examples/v2_manual.py
-PYTHONPATH=src python3 examples/v2_plans.py
-PYTHONPATH=src python3 examples/v2_deficit.py
-PYTHONPATH=src python3 examples/v2_protection.py
-PYTHONPATH=src python3 examples/v2_position_protection.py
-PYTHONPATH=src python3 examples/v2_quik_contract.py
-PYTHONPATH=src python3 examples/v2_quik_recovery.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m unittest discover -s tests_v2 -v
+.venv/bin/python examples/v2_round_trip.py
+.venv/bin/python examples/v2_cancel_replace.py
+.venv/bin/python examples/v2_recovery.py
+.venv/bin/python examples/v2_optimization.py
+.venv/bin/python examples/v2_backtest.py
+.venv/bin/python examples/v2_capital.py
+.venv/bin/python examples/v2_reservations.py
+.venv/bin/python examples/v2_rebalance.py
+.venv/bin/python examples/v2_manual.py
+.venv/bin/python examples/v2_plans.py
+.venv/bin/python examples/v2_deficit.py
+.venv/bin/python examples/v2_protection.py
+.venv/bin/python examples/v2_position_protection.py
+.venv/bin/python examples/v2_quik_contract.py
+.venv/bin/python examples/v2_quik_recovery.py
+.venv/bin/python examples/v2_quik_readonly.py
 ```
 
 Windows PowerShell:
 
 ```powershell
-$env:PYTHONPATH = 'src'
-py -3.12 -m unittest discover -s tests_v2 -v
-py -3.12 examples/v2_round_trip.py
-py -3.12 examples/v2_cancel_replace.py
-py -3.12 examples/v2_recovery.py
-py -3.12 examples/v2_optimization.py
-py -3.12 examples/v2_backtest.py
-py -3.12 examples/v2_capital.py
-py -3.12 examples/v2_reservations.py
-py -3.12 examples/v2_rebalance.py
-py -3.12 examples/v2_manual.py
-py -3.12 examples/v2_plans.py
-py -3.12 examples/v2_deficit.py
-py -3.12 examples/v2_protection.py
-py -3.12 examples/v2_position_protection.py
-py -3.12 examples/v2_quik_contract.py
-py -3.12 examples/v2_quik_recovery.py
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m unittest discover -s tests_v2 -v
+.\.venv\Scripts\python.exe examples/v2_round_trip.py
+.\.venv\Scripts\python.exe examples/v2_cancel_replace.py
+.\.venv\Scripts\python.exe examples/v2_recovery.py
+.\.venv\Scripts\python.exe examples/v2_optimization.py
+.\.venv\Scripts\python.exe examples/v2_backtest.py
+.\.venv\Scripts\python.exe examples/v2_capital.py
+.\.venv\Scripts\python.exe examples/v2_reservations.py
+.\.venv\Scripts\python.exe examples/v2_rebalance.py
+.\.venv\Scripts\python.exe examples/v2_manual.py
+.\.venv\Scripts\python.exe examples/v2_plans.py
+.\.venv\Scripts\python.exe examples/v2_deficit.py
+.\.venv\Scripts\python.exe examples/v2_protection.py
+.\.venv\Scripts\python.exe examples/v2_position_protection.py
+.\.venv\Scripts\python.exe examples/v2_quik_contract.py
+.\.venv\Scripts\python.exe examples/v2_quik_recovery.py
+.\.venv\Scripts\python.exe examples/v2_quik_readonly.py
 ```
 
 Демонстрация покупает 2 контракта по 100 и закрывает по 110, с комиссией 1 за каждое исполнение. Ожидаемые результаты: позиция 0, одна закрытая сделка, P&L и эквити 18 RUB. Символ TEST и счёт demo-account вымышленные.
@@ -103,9 +110,11 @@ py -3.12 examples/v2_quik_recovery.py
 
 `v2_quik_recovery.py` восстанавливает сделку, сохранённую шлюзом до потери доставки в OMS. Два перезапуска сохраняют 1 лот, комиссию 1.25 RUB, резерв 450 RUB и следующий TRANS_ID 2; новых подготовок при restart нет. Используются отдельные временные журналы OMS и QUIK.
 
+`v2_quik_readonly.py` запускает синтетический TCP-терминал на локальных случайных портах, проверяет два чтения таблиц и сохраняет временный диагностический журнал. Реальное подключение запускается только явной командой `python -m trading_system.quik_probe` по [отдельной инструкции](quik-readonly-check.md); примеры к брокеру не подключаются.
+
 ## Среда для разработки
 
-Достаточно одного репозитория. Новое ядро — `src/trading_system`, проверки — `tests_v2`, примеры — `examples`. Первые три PR (две итерации и реестр use-case) объединены пользователем в свои целевые ветки. Третья итерация развивается в `rewrite/v2-recovery` от `rewrite/v2-orders`, где уже находится согласованный реестр. Четвёртая итерация — отдельная ветка `rewrite/v2-lifecycle` от `rewrite/v2-recovery`. Пятая — `rewrite/v2-backtest` от `rewrite/v2-lifecycle`. Шестая — `rewrite/v2-capital` от `rewrite/v2-backtest`, с отдельными коммитами проверки и планирования. Седьмая — `rewrite/v2-reservations` от `rewrite/v2-capital`. Восьмая — `rewrite/v2-rebalance` от `rewrite/v2-reservations`. Девятая — `rewrite/v2-manual` от `rewrite/v2-rebalance`. Десятая — `rewrite/v2-plans` от `rewrite/v2-manual`. Одиннадцатая — `rewrite/v2-deficit` от `rewrite/v2-plans`. Двенадцатая — `rewrite/v2-protection` от `rewrite/v2-deficit`. Тринадцатая — `rewrite/v2-position-protection` от `rewrite/v2-protection`. Четырнадцатая — `rewrite/v2-quik-contract` от `rewrite/v2-position-protection`. Пятнадцатая — `rewrite/v2-quik-durability` от `rewrite/v2-quik-contract`. Перенос всей цепочки в `main` остаётся отдельным решением пользователя.
+Достаточно одного репозитория. Новое ядро — `src/trading_system`, проверки — `tests_v2`, примеры — `examples`. Первые три PR (две итерации и реестр use-case) объединены пользователем в свои целевые ветки. Третья итерация развивается в `rewrite/v2-recovery` от `rewrite/v2-orders`, где уже находится согласованный реестр. Четвёртая итерация — отдельная ветка `rewrite/v2-lifecycle` от `rewrite/v2-recovery`. Пятая — `rewrite/v2-backtest` от `rewrite/v2-lifecycle`. Шестая — `rewrite/v2-capital` от `rewrite/v2-backtest`, с отдельными коммитами проверки и планирования. Седьмая — `rewrite/v2-reservations` от `rewrite/v2-capital`. Восьмая — `rewrite/v2-rebalance` от `rewrite/v2-reservations`. Девятая — `rewrite/v2-manual` от `rewrite/v2-rebalance`. Десятая — `rewrite/v2-plans` от `rewrite/v2-manual`. Одиннадцатая — `rewrite/v2-deficit` от `rewrite/v2-plans`. Двенадцатая — `rewrite/v2-protection` от `rewrite/v2-deficit`. Тринадцатая — `rewrite/v2-position-protection` от `rewrite/v2-protection`. Четырнадцатая — `rewrite/v2-quik-contract` от `rewrite/v2-position-protection`. Пятнадцатая — `rewrite/v2-quik-durability` от `rewrite/v2-quik-contract`. Шестнадцатая — `rewrite/v2-quik-readonly` от `rewrite/v2-quik-durability`. Перенос всей цепочки в `main` остаётся отдельным решением пользователя.
 
 ```sh
 python3 -m venv .venv
@@ -129,6 +138,7 @@ python examples/v2_protection.py
 python examples/v2_position_protection.py
 python examples/v2_quik_contract.py
 python examples/v2_quik_recovery.py
+python examples/v2_quik_readonly.py
 ```
 
 CI проверяет новое ядро на Linux и Windows с Python 3.12: установку пакета, поведенческие тесты, типы и демонстрацию. Старые тесты остаются рядом как материал для сравнения; CI v2 не заявляет о совместимости нового API с прототипом.
