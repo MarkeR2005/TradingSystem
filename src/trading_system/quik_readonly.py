@@ -239,9 +239,19 @@ class ReadOnlyQuik:
                     response = await self._frame(self._reader, 'response')
                 if self._fault is not None:
                     raise QuikTransportError(self._fault)
-                if (type(response.get('id')) is not int or response['id'] != request_id
-                        or response['cmd'] != command or 'lua_error' in response):
-                    raise ValueError('response identity mismatch or Lua error')
+                if type(response.get('id')) is not int or response['id'] != request_id:
+                    raise ValueError('response request id mismatch')
+                if response['cmd'] == 'lua_error' or 'lua_error' in response:
+                    if (command == 'tsRuntimeInfo' and response['cmd'] == 'lua_error'
+                            and response.get('lua_error') ==
+                            'Command not implemented in Lua qsfunctions module: tsRuntimeInfo'):
+                        raise QuikTransportError('tsRuntimeInfo is not supported by the connected bridge; '
+                            'start TradingSystemReadOnly.lua and check which bridge uses the configured ports')
+                    # Full Lua errors may contain account data; retain them only in the raw journal.
+                    raise QuikTransportError('Lua rejected read-only command ' + command +
+                                             '; details retained in the local wire journal')
+                if response['cmd'] != command:
+                    raise ValueError('response command mismatch')
                 if command == 'isConnected' and (type(response['data']) is not int or response['data'] != 1):
                     raise QuikTransportError('terminal is not connected to its broker server')
                 return response['data']

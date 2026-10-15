@@ -38,6 +38,21 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.assertNotIn('snapshot', report)
         self.assertTrue((self.path / 'report.json').exists())
 
+    async def test_stock_bridge_reports_missing_guard_and_stops_at_first_request(self):
+        async def stock_bridge(request, raw):
+            return (json.dumps({**request, 'cmd': 'lua_error', 'lua_error':
+                'Command not implemented in Lua qsfunctions module: tsRuntimeInfo'}) + '\n').encode()
+        self.server.override = stock_bridge
+        report, code = await self.probe()
+        self.assertEqual(code, 1)
+        self.assertEqual(report['status'], 'failed')
+        self.assertIn('tsRuntimeInfo is not supported by the connected bridge', report['error'])
+        self.assertIn('TradingSystemReadOnly.lua', report['error'])
+        self.assertNotIn('snapshot', report)
+        self.assertFalse(report['reconciled'])
+        self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
+        self.assertEqual(report, json.loads((self.path / 'report.json').read_text()))
+
     async def test_existing_report_is_never_overwritten(self):
         self.path.mkdir()
         file = self.path / 'report.json'

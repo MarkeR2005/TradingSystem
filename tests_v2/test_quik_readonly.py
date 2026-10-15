@@ -90,11 +90,26 @@ class ReadOnlyQuikTests(IsolatedAsyncioTestCase):
         async def mismatch(request, raw):
             obj = json.loads(raw)
             obj['id'] += 1
+            obj['cmd'] = 'lua_error'
+            obj['lua_error'] = 'Command not implemented in Lua qsfunctions module: tsRuntimeInfo'
             return json.dumps(obj).encode() + b'\n'
         self.server.override = mismatch
-        with self.assertRaises(QuikTransportError):
+        with self.assertRaisesRegex(QuikTransportError, 'response request id mismatch'):
             await self.client.request('get_orders')
         self.assertFalse(self.client.healthy)
+
+    async def test_lua_error_has_command_context_without_exposing_raw_details(self):
+        await self.client.connect()
+        async def lua_failure(request, raw):
+            return (json.dumps({**request, 'cmd': 'lua_error', 'data': '',
+                'lua_error': 'failure for private-account-123'}) + '\n').encode()
+        self.server.override = lua_failure
+        with self.assertRaisesRegex(QuikTransportError, 'Lua rejected read-only command get_orders') as error:
+            await self.client.request('get_orders')
+        self.assertNotIn('private-account-123', str(error.exception))
+        self.assertFalse(self.client.healthy)
+        response = next(r for r in reversed(self.journal.records) if r['event'] == 'response')
+        self.assertIn(b'private-account-123', base64.b64decode(response['bytes_b64']))
 
     async def test_raw_malformed_json_is_saved_before_rejection(self):
         await self.client.connect()
