@@ -1,0 +1,11 @@
+{
+  "servers": [
+    {
+      "scriptName": "TradingSystemReadOnly",
+      "responseHostname": "127.0.0.1",
+      "responsePort": 34130,
+      "callbackHostname": "127.0.0.1",
+      "callbackPort": 34131
+    }
+  ]
+}

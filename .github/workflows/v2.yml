@@ -2,11 +2,12 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection, rewrite/v2-position-protection, rewrite/v2-quik-contract]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection, rewrite/v2-position-protection, rewrite/v2-quik-contract, rewrite/v2-quik-durability]
     paths:
       - 'src/**'
       - 'tests_v2/**'
       - 'examples/**'
+      - 'quik/**'
       - 'pyproject.toml'
       - '.github/workflows/v2.yml'
   workflow_dispatch:
@@ -65,3 +66,5 @@ jobs:
         run: python examples/v2_quik_contract.py
       - name: Durable QUIK callback recovery demonstration
         run: python examples/v2_quik_recovery.py
+      - name: Read-only QUIK loopback demonstration
+        run: python examples/v2_quik_readonly.py
