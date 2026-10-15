@@ -5,6 +5,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from trading_system.quik_probe import run_probe
 from tests_v2.quik_server import QuikServer
+from tests_v2.quik_parameters_fixture import parameters, security
 
 
 class ProbeTests(IsolatedAsyncioTestCase):
@@ -17,10 +18,39 @@ class ProbeTests(IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.server.close()
 
-    async def probe(self):
+    async def probe(self, **options):
         return await run_probe(self.path, profile='demo-quik', expected_version='13.2',
             request_port=self.server.request_port, callback_port=self.server.callback_port,
-            timeout=0.3, observe_seconds=0)
+            timeout=3, observe_seconds=0, **options)
+
+    def financial_terminal(self):
+        self.server.responses['tsRuntimeInfo']['capabilities'] = ['instrument_parameters_v1']
+        self.server.responses['getClassSecurities'] = 'SiZ6,'
+        self.server.responses['getSecurityInfo'] = security()
+        self.server.parameters = parameters()
+
+    async def test_financial_export_excludes_account_tables(self):
+        self.financial_terminal()
+        report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
+        self.assertEqual(code, 0)
+        instrument = json.loads((self.path / 'instrument.json').read_text())
+        self.assertEqual(instrument['symbol'], 'SiZ6')
+        self.assertEqual(instrument['financial']['point_value_candidate'], '1')
+        self.assertFalse(instrument['reconciled'])
+        self.assertNotIn('tables', instrument)
+        self.assertNotIn('trdaccid', json.dumps(instrument))
+        self.assertIn('tables', report['snapshot'])
+
+    async def test_incomplete_parameters_export_raw_failure_and_exit_two(self):
+        self.financial_terminal()
+        self.server.parameters['CURSTEPPRICE'] = None
+        report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
+        self.assertEqual(code, 2, report.get('error'))
+        self.assertEqual(report['status'], 'captured')
+        instrument = json.loads((self.path / 'instrument.json').read_text())
+        self.assertIsNone(instrument['financial']['parameters']['CURSTEPPRICE'])
+        self.assertIsNone(instrument['financial']['point_value_candidate'])
+        self.assertIn('CURSTEPPRICE.unavailable', instrument['financial']['issues'])
 
     async def test_report_and_separate_wire_journal_are_saved(self):
         report, code = await self.probe()

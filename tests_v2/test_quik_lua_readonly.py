@@ -58,6 +58,17 @@ class LuaReadOnlyTests(TestCase):
         self.assertEqual((response['protocol'], response['profile'], response['lua_version'], response['mode']),
                          (1, 'demo-quik', 'Lua 5.4', 'read_only'))
         self.assertEqual(len(lua.globals().called), 0)
+        self.assertEqual(list(response['capabilities'].values()), ['instrument_parameters_v1'])
+
+    def test_only_named_spbfut_parameters_reach_upstream(self):
+        lua = self.load()
+        for data in ('SPBFUT|SiZ6|LAST', 'QJSIM|SiZ6|STEPPRICE', 'SPBFUT|SiZ6|STEPPRICE|X',
+                     'SPBFUT||STEPPRICE', 'SPBFUT|SiZ6|stepprice'):
+            self.assertEqual(self.request(lua, 'getParamEx', data)['cmd'], 'lua_error')
+        self.assertEqual(len(lua.globals().called), 0)
+        for name in ('SEC_PRICE_STEP', 'STEPPRICE', 'CURSTEPPRICE', 'BUYDEPO', 'SELLDEPO'):
+            self.assertEqual(self.request(lua, 'getParamEx', 'SPBFUT|SiZ6|' + name)['cmd'], 'getParamEx')
+        self.assertEqual(len(lua.globals().called), 5)
 
     def test_wrong_lua_stops_before_loading_any_dll(self):
         lua = self.runtime('Lua 5.3')

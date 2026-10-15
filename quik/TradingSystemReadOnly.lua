@@ -14,6 +14,7 @@ local empty = {tsRuntimeInfo=true, isConnected=true, getClassesList=true, getTra
 local callbacks = {OnOrder=true, OnTrade=true, OnTransReply=true, OnConnected=true, OnDisconnected=true,
     OnFuturesClientHolding=true, OnFuturesLimitChange=true, OnFuturesLimitDelete=true,
     OnClose=true, OnStop=true, lua_error=true}
+local parameters = {SEC_PRICE_STEP=true, STEPPRICE=true, CURSTEPPRICE=true, BUYDEPO=true, SELLDEPO=true}
 
 local function identifier(value)
     return type(value) == "string" and #value > 0 and #value <= 64 and value:match("^[%w_.:%-]+$") ~= nil
@@ -31,6 +32,10 @@ local function allowed(command, data)
         local class_code, sec_code = data:match("^([^|]+)|([^|]+)$")
         return identifier(class_code) and identifier(sec_code)
     end
+    if command == "getParamEx" then
+        local class_code, sec_code, parameter = data:match("^([^|]+)|([^|]+)|([^|]+)$")
+        return class_code == "SPBFUT" and identifier(sec_code) and parameters[parameter] == true
+    end
     return false
 end
 
@@ -47,7 +52,8 @@ function qf.dispatch_and_process(msg)
     end
     if msg.cmd == "tsRuntimeInfo" then
         msg.data = {protocol=1, mode="read_only", profile=PROFILE,
-                    quik_version=getInfoParam("VERSION"), lua_version=_VERSION}
+                    quik_version=getInfoParam("VERSION"), lua_version=_VERSION,
+                    capabilities={"instrument_parameters_v1"}}
         return msg
     end
     return dispatch(msg)

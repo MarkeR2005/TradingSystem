@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import identifier, integer
+from .quik_parameters import PARAMETER_NAMES
 
 EMPTY_REQUESTS = frozenset({'tsRuntimeInfo', 'isConnected', 'getClassesList', 'getTradeAccounts',
     'get_orders', 'get_trades', 'getFuturesClientHoldings', 'getFuturesClientLimits'})
@@ -44,6 +45,11 @@ def validate_read(command: str, data: str) -> None:
         for part in data.split('|'):
             identifier(part)
         return
+    if command == 'getParamEx' and len(data.split('|')) == 3:
+        class_code, symbol, parameter = data.split('|')
+        if class_code == 'SPBFUT' and parameter in PARAMETER_NAMES:
+            identifier(symbol)
+            return
     raise ValueError('command or argument is outside the read-only allowlist')
 
 
