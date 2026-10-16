@@ -2,7 +2,7 @@ from copy import deepcopy
 from unittest import TestCase
 
 from trading_system.quik_parameters import build_financial_report
-from tests_v2.quik_parameters_fixture import parameters, security
+from tests_v2.quik_parameters_fixture import demo_fractional_margin_parameters, parameters, security
 
 
 class FinancialParametersTests(TestCase):
@@ -35,6 +35,45 @@ class FinancialParametersTests(TestCase):
         self.assertIsNone(report['values']['buy_depo'])
         self.assertIsNone(report['point_value_candidate'])
         self.assertIn('BUYDEPO.unavailable', report['issues'])
+
+    def test_demo_type_two_margin_preserves_kopecks_without_rounding(self):
+        params = demo_fractional_margin_parameters()
+        report = self.report(params=params)
+        self.assertTrue(report['complete'], report['issues'])
+        self.assertTrue(report['repeatable_observation'])
+        self.assertEqual(report['values']['buy_depo'], '7876.05')
+        self.assertEqual(report['values']['sell_depo'], '7999.56')
+        self.assertEqual(report['point_value_candidate'], '1')
+        self.assertEqual(report['parameters'], params)
+        self.assertEqual(report['previous_parameters'], params)
+        self.assertFalse(report['eligible_for_trading'])
+
+    def test_type_two_margin_still_requires_valid_positive_machine_value(self):
+        for name, field in (('BUYDEPO', 'buy_depo'), ('SELLDEPO', 'sell_depo')):
+            for key, value in (('result', '0'), ('param_type', '3'), ('param_type', '4'),
+                               ('param_type', 2), ('param_value', '0.000000'),
+                               ('param_value', '-0.01'), ('param_value', '7\u00a0876.05'),
+                               ('param_value', '7876,05'), ('param_value', 'NaN'),
+                               ('param_value', 'Infinity'), ('param_value', '1e4'),
+                               ('param_value', 7876.05), ('param_value', True)):
+                params = demo_fractional_margin_parameters()
+                params[name][key] = value
+                with self.subTest(name=name, key=key, value=value):
+                    report = self.report(params=params)
+                    self.assertFalse(report['complete'])
+                    self.assertIsNone(report['values'][field])
+                    self.assertIsNone(report['point_value_candidate'])
+
+    def test_one_kopeck_change_in_type_two_margin_withholds_candidate(self):
+        first, second = demo_fractional_margin_parameters(), demo_fractional_margin_parameters()
+        second['BUYDEPO']['param_value'] = '7876.060000'
+        report = build_financial_report(security(), first, security(), second)
+        self.assertTrue(report['complete'], report['issues'])
+        self.assertEqual(report['issues'], ['parameters_changed'])
+        self.assertEqual(report['previous_values']['buy_depo'], '7876.05')
+        self.assertEqual(report['values']['buy_depo'], '7876.06')
+        self.assertFalse(report['repeatable_observation'])
+        self.assertIsNone(report['point_value_candidate'])
 
     def test_numeric_fields_require_finite_machine_strings_not_display_values(self):
         for value in ('', '1,25', 'NaN', 'Infinity', '1e999999', '1_000', ' 1 ', '9' * 81, True, 1.0, None):

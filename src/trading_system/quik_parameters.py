@@ -42,7 +42,10 @@ def _values(security: dict[str, Any], parameters: dict[str, Any]) -> tuple[dict[
             issues.append(name + '.invalid_numeric_value')
             continue
         number = decimal(value)
-        if raw['param_type'] == '2' and number != number.to_integral_value():
+        # Demo QUIK 13.2 reports fractional BUYDEPO/SELLDEPO as type "2".
+        # Preserve their decimal machine value; never truncate money to an integer.
+        if (raw['param_type'] == '2' and name not in ('BUYDEPO', 'SELLDEPO')
+                and number != number.to_integral_value()):
             issues.append(name + '.invalid_integer_value')
             continue
         if number <= 0:

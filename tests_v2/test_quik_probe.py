@@ -5,7 +5,7 @@ from unittest import IsolatedAsyncioTestCase
 
 from trading_system.quik_probe import run_probe
 from tests_v2.quik_server import QuikServer
-from tests_v2.quik_parameters_fixture import parameters, security
+from tests_v2.quik_parameters_fixture import demo_fractional_margin_parameters, parameters, security
 
 
 class ProbeTests(IsolatedAsyncioTestCase):
@@ -51,6 +51,27 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.assertIsNone(instrument['financial']['parameters']['CURSTEPPRICE'])
         self.assertIsNone(instrument['financial']['point_value_candidate'])
         self.assertIn('CURSTEPPRICE.unavailable', instrument['financial']['issues'])
+
+    async def test_demo_fractional_margin_exports_complete_without_trading_permission(self):
+        self.financial_terminal()
+        self.server.parameters = demo_fractional_margin_parameters()
+        report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
+        self.assertEqual(code, 0, report.get('error', report.get('snapshot', {}).get('issues')))
+        instrument = json.loads((self.path / 'instrument.json').read_text())
+        financial = instrument['financial']
+        self.assertEqual(financial['values']['buy_depo'], '7876.05')
+        self.assertEqual(financial['values']['sell_depo'], '7999.56')
+        self.assertEqual(financial['point_value_candidate'], '1')
+        self.assertEqual(financial['issues'], [])
+        self.assertTrue(instrument['repeatable_observation'])
+        self.assertEqual(financial['parameters'], self.server.parameters)
+        self.assertEqual(financial['previous_parameters'], self.server.parameters)
+        self.assertFalse(financial['eligible_for_trading'])
+        self.assertFalse(instrument['reconciled'])
+        self.assertNotIn('tables', instrument)
+        commands = [r['cmd'] for r in self.server.requests]
+        self.assertEqual(commands.count('getParamEx'), 10)
+        self.assertNotIn('sendTransaction', commands)
 
     async def test_report_and_separate_wire_journal_are_saved(self):
         report, code = await self.probe()
