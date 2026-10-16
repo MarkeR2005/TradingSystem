@@ -17,6 +17,7 @@ class QuikServer:
             'get_orders': [], 'get_trades': [], 'getFuturesClientHoldings': [], 'getFuturesClientLimits': [],
             'getSecurityInfo': {'class_code': 'SPBFUT', 'code': 'TEST', 'min_price_step': 0.5, 'lot_size': 1}}
         self.override = None
+        self.parameters = {}
         self.fragment = False
 
     async def start(self):
@@ -41,6 +42,8 @@ class QuikServer:
                 self.requests.append(request)
                 if request['cmd'] == 'getInfoParam':
                     data = {'VERSION': '13.2.0.1', 'TRADEDATE': '14.10.2026', 'SERVERTIME': '09:30:00'}[request['data']]
+                elif request['cmd'] == 'getParamEx':
+                    data = self.parameters.get(request['data'].split('|')[-1])
                 else:
                     data = self.responses.get(request['cmd'])
                 result = {**request, 'data': data}

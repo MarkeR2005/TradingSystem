@@ -56,6 +56,17 @@ class ReadOnlyQuikTests(IsolatedAsyncioTestCase):
         self.assertEqual(len(self.server.requests), before)
         self.assertTrue(self.client.healthy)
 
+    async def test_only_named_futures_parameters_are_allowed(self):
+        await self.client.connect()
+        before = len(self.server.requests)
+        for value in ('SPBFUT|SiZ6|LAST', 'QJSIM|SiZ6|STEPPRICE', 'SPBFUT|SiZ6|STEPPRICE|X',
+                      'SPBFUT||STEPPRICE', 'SPBFUT|SiZ6|stepprice'):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                await self.client.request('getParamEx', value)
+        self.assertEqual(len(self.server.requests), before)
+        await self.client.request('getParamEx', 'SPBFUT|SiZ6|STEPPRICE')
+        self.assertEqual(self.server.requests[-1]['data'], 'SPBFUT|SiZ6|STEPPRICE')
+
     async def test_profile_or_version_mismatch_closes_session(self):
         self.server.responses['tsRuntimeInfo']['profile'] = 'psb-live'
         with self.assertRaises(QuikTransportError):
