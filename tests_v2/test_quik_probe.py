@@ -33,7 +33,7 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.financial_terminal()
         report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
         self.assertEqual(code, 0)
-        instrument = json.loads((self.path / 'instrument.json').read_text())
+        instrument = json.loads((self.path / 'instrument.json').read_text(encoding='utf-8'))
         self.assertEqual(instrument['symbol'], 'SiZ6')
         self.assertEqual(instrument['financial']['point_value_candidate'], '1')
         self.assertFalse(instrument['reconciled'])
@@ -47,7 +47,7 @@ class ProbeTests(IsolatedAsyncioTestCase):
         report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
         self.assertEqual(code, 2, report.get('error'))
         self.assertEqual(report['status'], 'captured')
-        instrument = json.loads((self.path / 'instrument.json').read_text())
+        instrument = json.loads((self.path / 'instrument.json').read_text(encoding='utf-8'))
         self.assertIsNone(instrument['financial']['parameters']['CURSTEPPRICE'])
         self.assertIsNone(instrument['financial']['point_value_candidate'])
         self.assertIn('CURSTEPPRICE.unavailable', instrument['financial']['issues'])
@@ -57,7 +57,7 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.server.parameters = demo_fractional_margin_parameters()
         report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
         self.assertEqual(code, 0, report.get('error', report.get('snapshot', {}).get('issues')))
-        instrument = json.loads((self.path / 'instrument.json').read_text())
+        instrument = json.loads((self.path / 'instrument.json').read_text(encoding='utf-8'))
         financial = instrument['financial']
         self.assertEqual(financial['values']['buy_depo'], '7876.05')
         self.assertEqual(financial['values']['sell_depo'], '7999.56')
@@ -76,7 +76,7 @@ class ProbeTests(IsolatedAsyncioTestCase):
     async def test_report_and_separate_wire_journal_are_saved(self):
         report, code = await self.probe()
         self.assertEqual(code, 0)
-        self.assertEqual(report, json.loads((self.path / 'report.json').read_text()))
+        self.assertEqual(report, json.loads((self.path / 'report.json').read_text(encoding='utf-8')))
         self.assertTrue((self.path / 'wire/events.jsonl').exists())
         self.assertFalse(report['snapshot']['reconciled'])
         self.assertNotIn('sendTransaction', [r['cmd'] for r in self.server.requests])
@@ -102,7 +102,7 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.assertNotIn('snapshot', report)
         self.assertFalse(report['reconciled'])
         self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
-        self.assertEqual(report, json.loads((self.path / 'report.json').read_text()))
+        self.assertEqual(report, json.loads((self.path / 'report.json').read_text(encoding='utf-8')))
 
     async def test_existing_report_is_never_overwritten(self):
         self.path.mkdir()
