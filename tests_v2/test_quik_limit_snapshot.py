@@ -118,3 +118,4 @@ class LimitSnapshotTests(IsolatedAsyncioTestCase):
                                         include_limits=True, limit_selection=self.key)
         self.assertFalse(result['limits']['selection_verified'])
         self.assertIn('financial_parameters_incomplete', result['limits']['snapshot_issues'])
+        self.assertNotIn('snapshot_unstable', result['financial']['issues'])

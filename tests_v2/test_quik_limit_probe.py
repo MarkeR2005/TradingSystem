@@ -8,6 +8,7 @@ from unittest.mock import patch
 from trading_system.quik_limits import FuturesLimitKey
 from trading_system.quik_probe import main, run_probe
 from tests_v2.quik_limits_fixture import accounts, limit_rows
+from tests_v2.quik_parameters_fixture import parameters, security
 from tests_v2.quik_server import QuikServer
 
 
@@ -97,6 +98,41 @@ class LimitProbeTests(IsolatedAsyncioTestCase):
         self.assertEqual(code, 0, report.get('error'))
         self.assertFalse((self.path / 'limits.json').exists())
         self.assertFalse((self.path / 'limit-keys.local.json').exists())
+
+    async def test_live_profile_with_plus_stock_account_keeps_futures_observation_complete(self):
+        self.server.responses['getTradeAccounts'][1]['trdaccid'] = 'STOCK+SETTLEMENT'
+        self.server.responses['tsRuntimeInfo'].update(profile='psb-live', quik_version='13.0.2.20')
+        self.server.responses['getFuturesClientLimits'] = [r for r in limit_rows() if r['limit_type'] != 3]
+        report, code = await run_probe(self.path, profile='psb-live', expected_version='13.0.2.20',
+            request_port=self.server.request_port, callback_port=self.server.callback_port,
+            timeout=3, observe_seconds=0, include_limits=True)
+        self.assertEqual(code, 0, report.get('snapshot', {}).get('issues'))
+        result = self.saved('limits.json')
+        self.assertEqual(result['runtime']['profile'], 'psb-live')
+        self.assertTrue(result['limits']['complete'])
+        self.assertEqual(result['limits']['issues'], [])
+        self.assertEqual(len(result['limits']['rows']), 3)
+        self.assertNotIn('STOCK+SETTLEMENT', json.dumps(result))
+        self.assertFalse(result['limits']['eligible_for_capital'])
+
+    async def test_plus_account_fix_does_not_hide_zero_buy_margin(self):
+        self.server.responses['getTradeAccounts'][1]['trdaccid'] = 'STOCK+SETTLEMENT'
+        self.server.responses['tsRuntimeInfo']['capabilities'] = ['instrument_parameters_v1']
+        self.server.responses['getClassSecurities'] = 'SiZ6,'
+        self.server.responses['getSecurityInfo'] = security()
+        self.server.parameters = parameters()
+        self.server.parameters['BUYDEPO'].update(result='1', param_type='2', param_value='0.000000', param_image='')
+        report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6',
+                                        include_financial=True, include_limits=True)
+        self.assertEqual(code, 2, report.get('error'))
+        result = self.saved('limits.json')['limits']
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['issues'], ['snapshot_unverified'])
+        self.assertFalse(result['repeatable_observation'])
+        financial = self.saved('instrument.json')['financial']
+        self.assertEqual(financial['issues'], ['BUYDEPO.nonpositive_value'])
+        self.assertIsNone(financial['values']['buy_depo'])
+        self.assertIsNone(financial['point_value_candidate'])
 
     async def test_invalid_identity_is_not_leaked_by_export(self):
         self.server.responses['getFuturesClientLimits'][0]['firmid'] = {'private': 'SECRET'}

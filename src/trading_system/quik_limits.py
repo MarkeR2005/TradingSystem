@@ -20,6 +20,14 @@ OPTIONAL_FIELDS = ('cbp_prev_limit', 'liquidity_coef', 'accruedint', 'options_pr
                    'indicative_varmargin', 'net_option_value')
 
 
+def _account_identifier(value: object) -> str:
+    # Observed trdaccid can contain '+' (seen in PSB stock accounts). This is
+    # an exact read-only key, not the identifier contract for order routing.
+    if not isinstance(value, str) or re.fullmatch(r'[A-Za-z0-9_.:+-]{1,64}', value) is None:
+        raise ValueError('invalid observed account identifier')
+    return value
+
+
 @dataclass(frozen=True)
 class FuturesLimitKey:
     firmid: str
@@ -29,7 +37,7 @@ class FuturesLimitKey:
 
     def __post_init__(self) -> None:
         identifier(self.firmid)
-        identifier(self.trdaccid)
+        _account_identifier(self.trdaccid)
         if type(self.limit_type) is not int or not 0 <= self.limit_type <= 2**31 - 1:
             raise ValueError('limit type must be a nonnegative integer')
         # Empty currency is an observed identity, not an implicit SUR/RUB alias.
@@ -61,7 +69,7 @@ def _key(raw: dict[str, Any]) -> FuturesLimitKey:
     limit_type, currency = raw.get('limit_type'), raw.get('currcode')
     if type(limit_type) is not int or not isinstance(currency, str):
         raise ValueError('missing or mistyped limit identity')
-    return FuturesLimitKey(identifier(raw.get('firmid')), identifier(raw.get('trdaccid')), limit_type, currency)
+    return FuturesLimitKey(identifier(raw.get('firmid')), _account_identifier(raw.get('trdaccid')), limit_type, currency)
 
 
 def _inventory(account_rows: list[dict[str, Any]], limit_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
@@ -69,7 +77,7 @@ def _inventory(account_rows: list[dict[str, Any]], limit_rows: list[dict[str, An
     invalid_account = False
     for account in _table(account_rows):
         try:
-            key = (identifier(account.get('firmid')), identifier(account.get('trdaccid')))
+            key = (identifier(account.get('firmid')), _account_identifier(account.get('trdaccid')))
             accounts[key].append(account)
         except ValueError:
             invalid_account = True

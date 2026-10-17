@@ -69,6 +69,36 @@ class FuturesLimitTests(TestCase):
                 self.assertFalse(result['selection_verified'])
                 self.assertTrue(any('account.not_unique' in r['issues'] for r in result['rows']))
 
+    def test_plus_in_unrelated_stock_account_does_not_invalidate_futures_limits(self):
+        acc = accounts()
+        acc[1]['trdaccid'] = 'STOCK+SETTLEMENT'
+        result = self.report(account_rows=acc)
+        self.assertTrue(result['complete'], result['issues'])
+        self.assertTrue(result['selection_verified'])
+
+    def test_observed_limit_account_preserves_literal_plus_in_exact_key(self):
+        acc = accounts()
+        acc[0]['trdaccid'] = 'FUTURES+SETTLEMENT'
+        rows = [limit_row()]
+        rows[0]['trdaccid'] = acc[0]['trdaccid']
+        key = replace(self.key, trdaccid=acc[0]['trdaccid'])
+        result = build_limits_report(acc, rows, acc, rows, selection=key)
+        self.assertTrue(result['selection_verified'])
+        self.assertEqual(result['selected_observation']['key']['trdaccid'], 'FUTURES+SETTLEMENT')
+        other = replace(key, trdaccid='FUTURESSETTLEMENT')
+        result = build_limits_report(acc, rows, acc, rows, selection=other)
+        self.assertFalse(result['selection_verified'])
+        self.assertIn('selection.not_unique', result['issues'])
+
+    def test_observed_account_does_not_allow_command_delimiters_or_change_routing_contract(self):
+        from trading_system.quik_contract import identifier
+        for value in ('FUTURES|OTHER', 'FUTURES;ACTION=NEW_ORDER', 'FUTURES\n', 'FUTURES\x00',
+                      'FUTURES ACCOUNT', 'FUTURES/OTHER', 'X' * 65):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                replace(self.key, trdaccid=value)
+        with self.assertRaises(ValueError):
+            identifier('FUTURES+SETTLEMENT')
+
     def test_class_membership_must_be_exact(self):
         acc = accounts()
         acc[0]['class_codes'] = '|NOTSPBFUT|'

@@ -145,7 +145,9 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
                                      selection=limit_selection, snapshot_issues=tuple(issues))
         if not limits['repeatable_observation']:
             issues.append('limits_unverified')
-            if financial is not None:
+            # Do not echo a financial failure back as an additional snapshot
+            # failure: limits already inherited it through snapshot_issues.
+            if financial is not None and financial['repeatable_observation']:
                 financial['point_value_candidate'] = None
                 financial['repeatable_observation'] = False
                 if 'snapshot_unstable' not in financial['issues']:
