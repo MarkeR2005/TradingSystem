@@ -6,6 +6,7 @@ from typing import Any
 from .persistence import canonical
 from .quik_contract import decimal, identifier, integer
 from .quik_parameters import PARAMETER_CAPABILITY, PARAMETER_NAMES, build_financial_report
+from .quik_limits import FuturesLimitKey, build_limits_report
 from .quik_readonly import ReadOnlyQuik
 
 TABLES = {'accounts': 'getTradeAccounts', 'orders': 'get_orders', 'trades': 'get_trades',
@@ -65,11 +66,15 @@ async def _date(client: ReadOnlyQuik) -> str:
 
 
 async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = None,
-                           symbol: str | None = None, include_financial: bool = False) -> dict[str, Any]:
+                           symbol: str | None = None, include_financial: bool = False,
+                           include_limits: bool = False,
+                           limit_selection: FuturesLimitKey | None = None) -> dict[str, Any]:
     if not client.healthy:
         raise SnapshotError('connect and validate the read-only terminal first')
     if symbol is not None and class_code is None:
         raise SnapshotError('instrument lookup requires an explicit class')
+    if limit_selection is not None and (not include_limits or not isinstance(limit_selection, FuturesLimitKey)):
+        raise SnapshotError('limit selection requires limits mode and a validated full key')
     if include_financial:
         if class_code != 'SPBFUT' or symbol is None:
             raise SnapshotError('financial parameters require an explicit SPBFUT instrument')
@@ -133,11 +138,25 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
             issues.append('financial_parameters_incomplete')
         elif not financial['repeatable_observation']:
             issues.append('financial_parameters_unverified')
+    limits = None
+    if include_limits:
+        limits = build_limits_report(passes[0]['accounts'], passes[0]['limits'],
+                                     passes[1]['accounts'], passes[1]['limits'],
+                                     selection=limit_selection, snapshot_issues=tuple(issues))
+        if not limits['repeatable_observation']:
+            issues.append('limits_unverified')
+            # Do not echo a financial failure back as an additional snapshot
+            # failure: limits already inherited it through snapshot_issues.
+            if financial is not None and financial['repeatable_observation']:
+                financial['point_value_candidate'] = None
+                financial['repeatable_observation'] = False
+                if 'snapshot_unstable' not in financial['issues']:
+                    financial['issues'].append('snapshot_unstable')
     return {'schema': 1, 'mode': 'read_only', 'runtime': client.runtime_info,
             'connection_id': client.connection_id, 'started_at': started, 'finished_at': datetime.now(UTC).isoformat(),
             'trading_date_before': date_before, 'trading_date_after': date_after,
             'classes': classes, 'class_code': class_code, 'instruments': instruments, 'security': security,
-            'financial': financial,
+            'financial': financial, 'limits': limits,
             'tables': passes[-1], 'previous_tables': passes[0], 'issues': issues,
             'callbacks_before': callbacks_before, 'callbacks_after': client.callback_count,
             'repeatable_observation': not issues, 'reconciled': False,
