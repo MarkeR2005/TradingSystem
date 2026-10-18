@@ -59,6 +59,17 @@ def version_parts(value: str) -> tuple[int, ...]:
     return tuple(int(part) for part in value.split('.'))
 
 
+def _diagnostic_value(value: object) -> str:
+    """Bound runtime metadata and escape controls; never expand nested values."""
+    if isinstance(value, str):
+        return json.dumps(value[:80], ensure_ascii=True) + ('...' if len(value) > 80 else '')
+    if value is None or type(value) in (bool, float):
+        return json.dumps(value, allow_nan=False)
+    if type(value) is int and -10**20 < value < 10**20:
+        return str(value)
+    return '<' + type(value).__name__ + '>'
+
+
 def _pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in items:
@@ -198,11 +209,28 @@ class ReadOnlyQuik:
                     self.host, self.callback_port, limit=self.max_frame_bytes)
             self._callback_task = asyncio.create_task(self._read_callbacks(callback_reader))
             info = await self.request('tsRuntimeInfo')
-            if (not isinstance(info, dict) or type(info.get('protocol')) is not int or info['protocol'] != 1
-                    or info.get('mode') != 'read_only' or info.get('profile') != self.profile
-                    or info.get('lua_version') != 'Lua 5.4'
-                    or version_parts(info.get('quik_version', ''))[:len(self._expected_version)] != self._expected_version):
-                raise ValueError('read-only protocol, profile, Lua or QUIK version mismatch')
+            if not isinstance(info, dict):
+                raise ValueError('tsRuntimeInfo mismatch: expected object, observed '
+                                 + _diagnostic_value(info))
+            expected: dict[str, object] = {'protocol': 1, 'mode': 'read_only', 'profile': self.profile,
+                'lua_version': 'Lua 5.4', 'quik_version': self.expected_version}
+            mismatches = []
+            for field, required in expected.items():
+                observed = info.get(field)
+                label = 'expected'
+                matches = type(observed) is type(required) and observed == required
+                if field == 'quik_version':
+                    label = 'expected_prefix'
+                    try:
+                        matches = (isinstance(observed, str)
+                            and version_parts(observed)[:len(self._expected_version)] == self._expected_version)
+                    except ValueError:
+                        matches = False
+                if not matches:
+                    actual = _diagnostic_value(observed) if field in info else '<missing>'
+                    mismatches.append(f'{field} {label}={_diagnostic_value(required)} observed={actual}')
+            if mismatches:
+                raise ValueError('tsRuntimeInfo mismatch: ' + '; '.join(mismatches))
             if await self.request('ping', 'Ping') != 'Pong':
                 raise ValueError('unexpected ping response')
             connected = await self.request('isConnected')
