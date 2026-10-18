@@ -146,14 +146,24 @@ with path.open(encoding="utf-8") as log:
 | План. чист. поз. | `cbplplanned` | Совпадает |
 | Вариац. маржа | `varmargin` | Совпадает |
 
-Суммы счёта в документ не перенесены. Это подтверждение четырёх полей по сообщению пользователя; полный ключ GUI по одним числам не проверяется. Поля `cbplused_for_orders`, `cbplused_for_positions`, `real_varmargin` и `kgo` с экраном пока не сопоставлены. В частности, показанная «Вариац. маржа» не подтверждает отдельно `real_varmargin`. Нового запуска с явным выбором строки ещё нет. Следующее действие — проверка полного ключа командой ниже; оставшиеся поля сверяются отдельно. Формулу доступного капитала, границу снимков/callbacks и сверку с OMS согласуем отдельно.
+Суммы счёта в документ не перенесены. Это подтверждение четырёх полей по сообщению пользователя; полный ключ GUI по одним числам не проверяется. Поля `cbplused_for_orders`, `cbplused_for_positions`, `real_varmargin` и `kgo` с экраном пока не сопоставлены. В частности, показанная «Вариац. маржа» не подтверждает отдельно `real_varmargin`. На момент сообщения в 13:40 явный выбор ещё не выполнялся; успешный запуск в 13:51 зафиксирован ниже. Оставшиеся поля сверяются отдельно. Формулу доступного капитала, границу снимков/callbacks и сверку с OMS согласуем отдельно.
 
-Теперь можно явно проверить эту строку в ПСБ. Возьмите точные firmid/trdaccid для неё из своего `quik-psb-financial-04/limit-keys.local.json`, замените две заглушки и используйте новый каталог:
+Проверка ниже уже пройдена пользователем. Команда сохранена для воспроизводимости: она берёт точный ключ из локального отчёта и требует единственную строку типа 0/SUR. Повтор текущей проверки не нужен. Для нового запуска используйте новый каталог:
 
 ```powershell
-$limitFirm = 'ЗАМЕНИТЬ_НА_firmid'
-$limitAccount = 'ЗАМЕНИТЬ_НА_trdaccid'
-.\.venv\Scripts\python.exe -m trading_system.quik_probe --profile psb-live --expect-version 13.0.2.20 --request-port 34130 --callback-port 34131 --class-code SPBFUT --symbol SRZ6 --financial --limits --limit-firm $limitFirm --limit-account $limitAccount --limit-type 0 --limit-currency SUR --output .\data\quik-psb-selected-01
+$limitData = Get-Content -LiteralPath '.\data\quik-psb-financial-04\limit-keys.local.json' -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+$limitRows = @($limitData.keys | Where-Object { $_.limit_type -eq 0 -and $_.currcode -ceq 'SUR' })
+if ($limitRows.Count -ne 1) { throw 'Не найдена единственная строка лимита типа 0 / SUR' }
+$limitKey = $limitRows[0]
+.\.venv\Scripts\python.exe -m trading_system.quik_probe --profile psb-live --expect-version 13.0.2.20 --request-port 34130 --callback-port 34131 --class-code SPBFUT --symbol SRZ6 --financial --limits --limit-firm $limitKey.firmid --limit-account $limitKey.trdaccid --limit-type 0 --limit-currency SUR --output .\data\quik-psb-selected-01
 ```
 
 При неизменных полных данных ожидается `requested=True; verified=True`, но `eligible for capital=False` и `reconciled=False` сохраняются. Если каталог уже существует, выберите следующий номер. [Контракт полного ключа](quik-limits-check.md#4-явно-выбрать-одну-строку).
+
+## Явный выбор строки подтверждён — 18 октября, 13:51 МСК
+
+Пользователь выполнил `quik-psb-selected-01`. Снимок получен в 13:51:28 МСК: профиль psb-live, QUIK 13.0.2.20 / Lua 5.4, SPBFUT/SRZ6. Полный выбранный ключ точно совпадает со строкой типа 0/SUR из предыдущего quik-psb-financial-04. В обоих проходах найдена единственная соответствующая строка, `selected_observation.key` совпадает с `selection`, `selection_verified=True`.
+
+Два счёта, три строки лимитов, заявок/сделок/позиций нет. Таблицы, справочник и финансовые параметры совпадают между проходами; callbacks=0, общие и вложенные issues пусты. Финансовые параметры и лимиты полны и повторяемы. BUYDEPO=5292.77, SELLDEPO=5461.57; шаг и стоимость шага 1 RUB, кандидат стоимости пункта 1. Анализаторы точно воспроизводят результаты; instrument.json, limits.json и локальная расшифровка соответствуют полному отчёту. Реквизиты и суммы счёта в репозиторий не перенесены.
+
+Приёмка диагностического чтения и явного выбора строки в итерации 18 пройдена; повторные подключения для её подтверждения не нужны. `eligible_for_capital=False`, `eligible_for_trading=False`, `reconciled=False` ожидаемы: эта итерация подтверждает наблюдение, но не формулу доступного капитала, синхронизацию с callbacks или сверку с OMS. Четыре поля уже сопоставлены с экраном пользователем; оставшиеся поля, единицы и правила их использования относятся к дальнейшей проверке политики капитала. Следующий срез — явная проверяемая политика преобразования брокерских наблюдений в модель капитала с TDD; торговые операции пока не включаются.
