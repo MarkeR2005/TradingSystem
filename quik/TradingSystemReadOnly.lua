@@ -1,8 +1,25 @@
 -- Copy next to QuikSharp.lua from pinned quik_python commit 0eae024.
 -- Start THIS script, not QuikSharp.lua. No order-writing commands are exposed.
--- Use a separate folder/ports and change PROFILE for a separate live terminal.
+-- Put the local profile in TradingSystemReadOnly.profile.local next to this script.
+-- Separate terminals need separate folders; distinct ports only if both run together.
 local PROFILE = "demo-quik"
 assert(_VERSION == "Lua 5.4", "TradingSystem requires Lua 5.4; actual runtime: " .. tostring(_VERSION))
+
+local profile_file, _, profile_error = io.open(getScriptPath() .. "\\TradingSystemReadOnly.profile.local", "rb")
+if profile_file then
+    -- 64 ASCII characters + optional UTF-8 BOM + CRLF, and one byte to detect overflow.
+    local contents = profile_file:read(70)
+    local closed = profile_file:close()
+    assert(contents and closed, "Invalid local read-only profile: cannot read file")
+    contents = contents:gsub("^\239\187\191", ""):gsub("\r?\n$", "")
+    assert(#contents >= 1 and #contents <= 64 and contents:match("^[A-Za-z0-9_.:%-]+$"),
+           "Invalid local read-only profile: expected one ASCII identifier of 1-64 characters")
+    PROFILE = contents
+else
+    -- ENOENT only: keep the legacy default for installations without a local file.
+    -- Permission/read errors must not silently select another terminal profile.
+    assert(profile_error == 2, "Cannot open local read-only profile")
+end
 
 dofile(getScriptPath() .. "\\QuikSharp.lua")
 local qf = require("qsfunctions")

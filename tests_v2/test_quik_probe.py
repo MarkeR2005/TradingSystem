@@ -87,7 +87,10 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.assertEqual(code, 1)
         self.assertEqual(report['status'], 'failed')
         self.assertNotIn('snapshot', report)
-        self.assertTrue((self.path / 'report.json').exists())
+        self.assertIn('profile expected="demo-quik" observed="psb-live"', report['error'])
+        self.assertEqual(report, json.loads((self.path / 'report.json').read_text(encoding='utf-8')))
+        self.assertFalse(report['reconciled'])
+        self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
 
     async def test_stock_bridge_reports_missing_guard_and_stops_at_first_request(self):
         async def stock_bridge(request, raw):

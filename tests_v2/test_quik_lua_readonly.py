@@ -1,4 +1,5 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from lupa.lua54 import LuaError, LuaRuntime
@@ -8,11 +9,19 @@ SCRIPT = Path(__file__).parents[1] / 'quik' / 'TradingSystemReadOnly.lua'
 
 
 class LuaReadOnlyTests(TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.script_directory = Path(self.temp.name) / 'bridge'
+        self.script_directory.mkdir()
+        self.profile_path = Path(str(self.script_directory) + '\\TradingSystemReadOnly.profile.local')
+
     def runtime(self, version='Lua 5.4'):
         lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.globals().script_directory = str(self.script_directory)
         lua.execute('''
             called = {}; callbacks = {}; ran = false
-            function getScriptPath() return 'C:/QUIK' end
+            function getScriptPath() return script_directory end
             function getInfoParam(name) return '13.2.0.1' end
             function dofile(path) loaded_path = path end
             function sendCallback(msg) table.insert(callbacks, msg); return true end
@@ -59,6 +68,60 @@ class LuaReadOnlyTests(TestCase):
                          (1, 'demo-quik', 'Lua 5.4', 'read_only'))
         self.assertEqual(len(lua.globals().called), 0)
         self.assertEqual(list(response['capabilities'].values()), ['instrument_parameters_v1'])
+
+    def test_local_profile_survives_loading_unmodified_wrapper_and_preserves_read_only(self):
+        for contents in (b'psb-live', b'psb-live\n', b'psb-live\r\n', b'\xef\xbb\xbfpsb-live\r\n'):
+            with self.subTest(contents=contents):
+                self.profile_path.write_bytes(contents)
+                lua = self.load()
+                info = self.request(lua, 'tsRuntimeInfo')['data']
+                self.assertEqual(info['profile'], 'psb-live')
+                self.assertEqual(info['mode'], 'read_only')
+                self.assertEqual(self.request(lua, 'sendTransaction')['cmd'], 'lua_error')
+                lua.globals().main()
+                self.assertTrue(lua.globals().ran)
+                self.assertEqual(self.profile_path.read_bytes(), contents)
+                self.assertEqual(len(lua.globals().called), 0)
+
+    def test_profile_length_boundaries_and_ascii_identifier_characters(self):
+        for name in ('a', 'a' * 64, 'Desk_1.psb:live-1'):
+            with self.subTest(name=name):
+                self.profile_path.write_bytes(b'\xef\xbb\xbf' + name.encode() + b'\r\n')
+                self.assertEqual(self.request(self.load(), 'tsRuntimeInfo')['data']['profile'], name)
+
+    def test_invalid_local_profile_stops_before_loading_bridge(self):
+        for contents in (b'', b' ', b'psb-live\nother', b'psb-live\x00', b'psb-live\n\n',
+                         b'psb-live|other', b'return "psb-live"', b'a' * 65, b'a' * 100000,
+                         'псб'.encode(), 'psb-live'.encode('utf-16')):
+            with self.subTest(contents=contents[:30]):
+                self.profile_path.write_bytes(contents)
+                lua = self.runtime()
+                with self.assertRaisesRegex(LuaError, 'Invalid local read-only profile'):
+                    lua.execute(SCRIPT.read_text())
+                self.assertIsNone(lua.globals().loaded_path)
+                self.assertFalse(lua.globals().ran)
+
+    def test_unreadable_profile_does_not_silently_use_demo(self):
+        lua = self.runtime()
+        lua.execute('io.open = function() return nil, "private file details", 13 end')
+        with self.assertRaisesRegex(LuaError, 'Cannot open local read-only profile') as error:
+            lua.execute(SCRIPT.read_text())
+        self.assertNotIn('private file details', str(error.exception))
+        self.assertIsNone(lua.globals().loaded_path)
+
+    def test_profile_read_failure_closes_file_and_stops_loading(self):
+        lua = self.runtime()
+        lua.execute('''
+            profile_closed = false
+            io.open = function()
+                return {read = function() return nil end,
+                        close = function() profile_closed = true; return true end}
+            end
+        ''')
+        with self.assertRaisesRegex(LuaError, 'Invalid local read-only profile'):
+            lua.execute(SCRIPT.read_text())
+        self.assertTrue(lua.globals().profile_closed)
+        self.assertIsNone(lua.globals().loaded_path)
 
     def test_only_named_spbfut_parameters_reach_upstream(self):
         lua = self.load()

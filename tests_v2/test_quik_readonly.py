@@ -69,15 +69,82 @@ class ReadOnlyQuikTests(IsolatedAsyncioTestCase):
 
     async def test_profile_or_version_mismatch_closes_session(self):
         self.server.responses['tsRuntimeInfo']['profile'] = 'psb-live'
-        with self.assertRaises(QuikTransportError):
+        with self.assertRaisesRegex(QuikTransportError,
+                'profile expected="demo-quik" observed="psb-live"'):
             await self.client.connect()
         self.assertFalse(self.client.healthy)
+        self.assertEqual(self.client.runtime_info, {})
         self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
 
     async def test_major_minor_prefix_does_not_accept_a_different_version(self):
         self.server.responses['tsRuntimeInfo']['quik_version'] = '13.20.0.1'
-        with self.assertRaises(QuikTransportError):
+        with self.assertRaisesRegex(QuikTransportError,
+                'quik_version expected_prefix="13.2" observed="13.20.0.1"'):
             await self.client.connect()
+
+    async def test_runtime_error_reports_all_mismatches_without_extra_fields(self):
+        self.server.responses['tsRuntimeInfo'] = {
+            'protocol': 2, 'mode': 'live', 'profile': 'psb-live',
+            'lua_version': 'Lua 5.3', 'quik_version': '13.0.2.20',
+            'accounts': ['private-account-123']}
+        with self.assertRaises(QuikTransportError) as error:
+            await self.client.connect()
+        message = str(error.exception)
+        for detail in ('protocol expected=1 observed=2',
+                       'mode expected="read_only" observed="live"',
+                       'profile expected="demo-quik" observed="psb-live"',
+                       'lua_version expected="Lua 5.4" observed="Lua 5.3"',
+                       'quik_version expected_prefix="13.2" observed="13.0.2.20"'):
+            self.assertIn(detail, message)
+        self.assertNotIn('private-account-123', message)
+        self.assertNotIn('accounts', message)
+        self.assertFalse(self.client.healthy)
+        self.assertEqual(self.client.runtime_info, {})
+        self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
+
+    async def test_boolean_protocol_is_not_accepted_as_integer_one(self):
+        self.server.responses['tsRuntimeInfo']['protocol'] = True
+        with self.assertRaisesRegex(QuikTransportError, 'protocol expected=1 observed=true'):
+            await self.client.connect()
+        self.assertFalse(self.client.healthy)
+        self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
+
+    async def test_missing_runtime_fields_are_named(self):
+        self.server.responses['tsRuntimeInfo'] = {}
+        with self.assertRaises(QuikTransportError) as error:
+            await self.client.connect()
+        for field, expected in (('protocol', '1'), ('mode', '"read_only"'),
+                                ('profile', '"demo-quik"'), ('lua_version', '"Lua 5.4"')):
+            self.assertIn(f'{field} expected={expected} observed=<missing>', str(error.exception))
+        self.assertIn('quik_version expected_prefix="13.2" observed=<missing>', str(error.exception))
+
+    async def test_invalid_version_names_value_without_changing_version_rules(self):
+        self.server.responses['tsRuntimeInfo']['quik_version'] = '13.2-preview'
+        with self.assertRaisesRegex(QuikTransportError,
+                'quik_version expected_prefix="13.2" observed="13.2-preview"'):
+            await self.client.connect()
+        self.assertFalse(self.client.healthy)
+
+    async def test_runtime_error_bounds_and_escapes_values_without_nested_data(self):
+        self.server.responses['tsRuntimeInfo'].update({
+            'mode': {'account': 'private-account-123'}, 'profile': '\n\x1b' + 'x' * 10000})
+        with self.assertRaises(QuikTransportError) as error:
+            await self.client.connect()
+        message = str(error.exception)
+        self.assertIn('mode expected="read_only" observed=<dict>', message)
+        self.assertNotIn('private-account-123', message)
+        self.assertIn(r'\n\u001b', message)
+        self.assertNotIn('\n', message)
+        self.assertNotIn('\x1b', message)
+        self.assertLess(len(message), 1000)
+
+    async def test_non_object_runtime_reply_reports_type_without_contents(self):
+        self.server.responses['tsRuntimeInfo'] = ['private-account-123']
+        with self.assertRaisesRegex(QuikTransportError,
+                'tsRuntimeInfo mismatch: expected object, observed <list>') as error:
+            await self.client.connect()
+        self.assertNotIn('private-account-123', str(error.exception))
+        self.assertEqual([r['cmd'] for r in self.server.requests], ['tsRuntimeInfo'])
 
     async def test_bridge_must_explicitly_confirm_read_only_mode(self):
         self.server.responses['tsRuntimeInfo']['mode'] = 'live'
