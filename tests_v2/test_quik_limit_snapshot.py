@@ -7,6 +7,7 @@ from unittest import IsolatedAsyncioTestCase
 from trading_system.persistence import DurableJournal
 from trading_system.quik_limits import FuturesLimitKey
 from trading_system.quik_readonly import ReadOnlyQuik
+from trading_system.quik_capital import FuturesResourcePolicy, assess_futures_resource
 from trading_system.quik_snapshot import capture_snapshot, SnapshotError
 from tests_v2.quik_limits_fixture import accounts, limit_rows
 from tests_v2.quik_parameters_fixture import parameters, security
@@ -14,6 +15,20 @@ from tests_v2.quik_server import QuikServer
 
 
 class LimitSnapshotTests(IsolatedAsyncioTestCase):
+    async def test_captured_limit_snapshot_supplies_a_readonly_resource_assessment(self):
+        from datetime import UTC, datetime, timedelta
+        from decimal import Decimal
+        value = await capture_snapshot(self.client, include_limits=True, limit_selection=self.key)
+        policy = FuturesResourcePolicy('demo-quik', '13.2.0.1', self.key,
+            datetime.strptime(value['trading_date_before'], '%d.%m.%Y').date(), timedelta(seconds=30))
+        assessment = assess_futures_resource(value, policy, now=datetime.now(UTC), reservations=())
+        self.assertTrue(assessment.complete)
+        self.assertEqual(assessment.broker_free, Decimal('84999.75'))
+        self.assertEqual(assessment.connection_id, self.client.connection_id)
+        self.assertFalse(assessment.eligible_for_capital)
+        self.assertFalse(assessment.reconciled)
+        self.assertNotIn('sendTransaction', [r['cmd'] for r in self.server.requests])
+
     async def asyncSetUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
