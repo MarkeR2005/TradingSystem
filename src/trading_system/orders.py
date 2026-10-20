@@ -19,7 +19,7 @@ from .capital import AccountKey, CapitalPlan, CapitalUsage, _exact, _number
 from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocate_policy, initial_policy
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
-from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition
+from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition, RepairExecutions
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
@@ -142,8 +142,24 @@ class OrderManager:
         self.ledger.adopt(candidate.ledger)
 
     async def handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, RepairExecutions):
+            raise ValueError('execution repair requires the durable gateway evidence guard')
         async with self._transition_lock:
             await self._transition(message)
+
+    async def _apply_guarded_repair(self, command: RepairExecutions, verify_source: Callable[[], None]) -> None:
+        async with self._transition_lock:
+            if self._failed_after_commit:
+                raise JournalError('durable transition could not be delivered; restart required')
+            previous = self._inventory_operations.get(command.operation_id)
+            if previous is not None:
+                if previous != command:
+                    raise ValueError('operation identifier has conflicting contents')
+                return
+            if self.journal is None or not self.journal.writable or self.journal.degraded:
+                raise JournalError('execution repair requires a healthy durable OMS journal')
+            verify_source()
+            await self._transition(command)
 
     async def configure_capital(self, policy: CapitalPolicy) -> None:
         await self.handle(ConfigureCapital(policy))
@@ -160,7 +176,7 @@ class OrderManager:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
         if self._plans.duplicate(message) or self._deficits.duplicate(message):
             return
-        if isinstance(message, (InventoryReport, TransferPosition, CloseManual)):
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions)):
             previous = self._inventory_operations.get(message.operation_id)
             if previous is not None:
                 if previous != message:
@@ -431,6 +447,9 @@ class OrderManager:
         return None
 
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, RepairExecutions):
+            await self._repair_executions(message)
+            return  # No cancellation, plan or deficit policy decisions in a repair.
         if isinstance(message, (StartDeficit, RetryDeficit, AcknowledgeDeficit, CheckDeficits)):
             await self._deficits.handle(self, message)
         elif isinstance(message, (SubmitPlan, ClosePlan, PlanMarks, CheckPlanDeadlines, RetryPlan,
@@ -813,7 +832,54 @@ class OrderManager:
         self._cancellations.pop(order.order_id, None)
         await self._update(replace(order, status=OrderStatus.REJECTED, rejection_reason=message.reason))
 
-    async def _execute(self, execution: Execution) -> None:
+    async def _repair_executions(self, command: RepairExecutions) -> None:
+        if command.expected_revision != self._revision:
+            raise ValueError('OMS revision changed; rebuild execution repair')
+        if not command.created_at <= self.clock.now() <= command.expires_at:
+            raise ValueError('execution repair is not current')
+        view = self.observe_gateway(command.gateway_id)
+        if command.gateway_id in self._inventory_gateways:
+            raise ValueError('inventory cutovers require a separate history recovery')
+        targets = {o.order_id: o for o in command.order_targets}
+        local = {o.order_id: o for o in view.orders if o.order_id not in view.local_rejections}
+        if set(targets) != set(local):
+            raise ValueError('repair order coverage changed')
+        owners = set()
+        for execution in command.executions:
+            order = local.get(execution.order_id)
+            if order is None or execution.key in self._executions:
+                raise ValueError('repair requires an absent execution of a known order')
+            owners.add(order.strategy_id)
+            if self._plans.active(order.strategy_id) or self._deficits.owns_route(execution.route):
+                raise ValueError('active plan, protection or deficit requires separate recovery')
+        if any(isinstance(op, TransferPosition) and {op.source_id, op.target_id} & owners
+               for op in self._inventory_operations.values()):
+            raise ValueError('ownership transfers require a separate history recovery')
+        first_time = min(e.timestamp for e in command.executions)
+        if any(self._orders[e.order_id].strategy_id in owners
+               and (e.timestamp > first_time or (e.timestamp == first_time and e.route.instrument.id.gateway_id
+                                                != command.gateway_id)) for e in self._executions.values()):
+            raise ValueError('repair would precede already booked owner history')
+        self._unreconciled.add(command.gateway_id)
+        self._invalidate_allocation()
+        for execution in command.executions:
+            await self._execute(execution, settle_cancel=False)
+        for order_id, target in targets.items():
+            actual = self._orders[order_id]
+            if actual.intent != target.intent or actual.filled_quantity != target.filled_quantity:
+                raise ValueError('repair cumulative order result differs from observation')
+        observed = {p.route: _exact(p.quantity) for p in command.observed_positions}
+        totals = dict.fromkeys(observed, Fraction())
+        for _, position in self.ledger.positions():
+            if position.route.instrument.id.gateway_id == command.gateway_id:
+                if position.route not in totals:
+                    raise ValueError('repair position outside observed scope')
+                totals[position.route] += _exact(position.quantity)
+        if totals != observed:
+            raise ValueError('repair net positions differ from observation')
+        self._inventory_operations[command.operation_id] = command
+
+    async def _execute(self, execution: Execution, *, settle_cancel: bool = True) -> None:
         previous = self._executions.get(execution.key)
         if previous is not None:
             if previous != execution:
@@ -858,4 +924,5 @@ class OrderManager:
             status=status,
         ))
         await self.bus.publish(strategy_recipient(order.strategy_id), ExecutionApplied(execution))
-        await self._finish_cancel(order.order_id)
+        if settle_cancel:
+            await self._finish_cancel(order.order_id)

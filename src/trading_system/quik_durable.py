@@ -12,13 +12,15 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from . import codec
-from .domain import GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
+from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
 from .events import EventBus
-from .orders import gateway_recipient
+from .orders import OrderManager, gateway_recipient
+from .inventory import RepairExecutions
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import QuikOrder, QuikRoute, QuikTrade
 from .quik_replay import QuikReplayGateway, QuikTransaction
 from .quik_compare import BrokerLink, QuikBindings
+from .quik_repair import ExecutionEvidence, missing_suffix
 from .state import json_object
 from .time import Clock, ManualClock
 
@@ -61,6 +63,12 @@ class _Protocol(QuikReplayGateway):
                   for number, local in sorted(self._by_broker.items())),
             tuple(BrokerLink(t.route, number, f'{self.session_id}:{number}')
                   for number, t in sorted(self._trades.items())))
+
+    def execution_evidence(self, revision: int) -> ExecutionEvidence:
+        return ExecutionEvidence(self.comparison_bindings(revision), tuple(
+            Execution(f'{self.session_id}:{t.trade_id}', self._by_broker[t.order_id],
+                      t.route, t.side, t.quantity, t.price, t.commission, t.timestamp)
+            for t in self._trades.values()))
 
     async def apply(self, payload: dict[str, Any]) -> None:
         op = payload.get('op')
@@ -225,6 +233,31 @@ class QuikDurableGateway:
     def comparison_bindings(self) -> QuikBindings:
         """Immutable mappings from committed protocol state; no delivery or apply."""
         return self._engine.comparison_bindings(self._number)
+
+    @property
+    def execution_evidence(self) -> ExecutionEvidence:
+        return self._engine.execution_evidence(self._number)
+
+    async def apply_execution_repair(self, command: RepairExecutions, oms: OrderManager) -> None:
+        """Operator call, outside consumers; no transport or automatic resume."""
+        if not isinstance(command, RepairExecutions):
+            raise ValueError('expected an execution repair command')
+        if self._bus is None or oms.bus is not self._bus:
+            raise ValueError('repair requires the attached OMS event bus')
+        await self._bus.drain()  # Never drain while holding a lock needed by a consumer.
+        async with self._lock:
+            def verify_source() -> None:
+                if (not self._started or self._failed or not self.journal.writable or self.journal.degraded
+                        or self.journal.record_count != self._tail):
+                    raise JournalError('execution source is unavailable; restart and inspect its journal')
+                evidence = self.execution_evidence
+                if (command.gateway_id, command.session_id, command.source_revision, command.source_digest) != (
+                        self.gateway_id, self._engine.session_id, self._number, evidence.digest):
+                    raise ValueError('execution source changed; rebuild repair')
+                if command.executions != missing_suffix(evidence, oms.observe_gateway(self.gateway_id)):
+                    raise ValueError('repair payload differs from the committed missing suffix')
+
+            await oms._apply_guarded_repair(command, verify_source)
 
     @property
     def unmatched(self) -> tuple[QuikOrder | QuikTrade, ...]:
