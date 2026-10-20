@@ -2,6 +2,8 @@
 
 Разрабатывается управляемая офлайн-симуляция. Работает цепочка: завершённая свеча → стратегия → намерение → подтверждение/исполнение → позиция → закрытая сделка → эквити. Во второй итерации добавлены лимитная цена, отмена, замена и гонки исполнения с отменой. Третья добавляет надёжный журнал, SQLite-проекцию, восстановление учёта и запрет торговли до сверки. Четвёртая — pause/resume, checkpoints стратегии и `OPTIMIZING` с отдельным CPU-процессом. Пятая — общая история завершённых свечей, прогрев, synthetic/correction и первоначальный одиночный бэктест. Шестая — промежуточная проверка, исправления очередей/хранения и первый планировщик капитала по снимкам счетов. Седьмая — допуски маршрутов, атомарные резервы OMS и их восстановление. Восьмая связывает снимки источника и текущую занятость OMS с пересчётом бюджетов. Девятая добавляет сверку внешних позиций/заявок, ручного владельца, частичную передачу и лимитное закрытие без фиктивных fills. Десятая — групповые планы, атомарный допуск, три политики сбоя ноги и локальная защита совокупного исполненного P&L. Одиннадцатая — ожидание и пропорциональное сокращение внешнего дефицита с отменами, ограниченными повторными попытками и восстановлением. Двенадцатая добавляет TP/trailing, сохранение максимума P&L и изменение параметров защиты открытого плана. Тринадцатая защищает одиночные входы и существующие обычные/manual-позиции, завершая базовую офлайн-часть этапа 6. Четырнадцатая начинает этап 7: строгий контракт QUIK, replay брокерских callbacks и блокировка неопределённых исходов. Пятнадцатая сохраняет идентификаторы и callbacks в отдельном журнале шлюза, восстанавливает доставку в OMS без повторной подготовки заявок. Шестнадцатая добавляет ограниченный read-only транспорт, два диагностических чтения таблиц и команду проверки демо-терминала. Семнадцатая — чтение финансовых параметров фьючерса, проверка единиц и отдельный отчёт инструмента. Восемнадцатая — перечень фьючерсных лимитов, проверка точного ключа и отдельный отчёт с условными именами счетов. Девятнадцатая — чистая оценка свободного брокерского ресурса и только локальных денежных резервов, с отказом при необходимости сверки. Двадцатая — контроль доставки callbacks до курсоров Lua вокруг двух чтений, без объявления атомарного снимка или сверки OMS. Двадцать первая — нормализация брокерских записей и чистый отчёт сравнения с неизменяемым состоянием OMS.
 
+Текущий срез — [итерация 22](iteration-22.md): журналируемое применение недостающего конца сохранённых исполнений QUIK, без возобновления торговли.
+
 Документы разделены по назначению:
 
 - [Итоговая проверка этапа 6](stage-06-review.md): завершённая офлайн-часть защиты и оставшиеся требования перед QUIK/приёмкой.
@@ -70,6 +72,7 @@ python3 -m venv .venv
 .venv/bin/python examples/v2_quik_capital.py
 .venv/bin/python examples/v2_quik_boundary.py
 .venv/bin/python examples/v2_quik_compare.py
+python examples/v2_quik_repair.py
 ```
 
 Windows PowerShell:
@@ -141,9 +144,11 @@ py -3.12 -m venv .venv
 
 `v2_quik_compare.py` сопоставляет синтетический снимок со всей совокупной позицией владельцев, сворачивает повтор сделки и показывает неизвестную отмену, пропавшую заявку и расхождение нетто. Это чистый отчёт: он не изменяет позиции и резервы. [Контракт и API](iteration-21.md).
 
+`v2_quik_repair.py` применяет сохранённый fill, потерянный OMS, проверяет точный повтор и restart. Позиция, комиссия и резерв восстанавливаются однократно; торговля остаётся заблокированной. [Область применения и API](iteration-22.md).
+
 ## Среда для разработки
 
-Достаточно одного репозитория. Новое ядро — `src/trading_system`, проверки — `tests_v2`, примеры — `examples`. Первые три PR (две итерации и реестр use-case) объединены пользователем в свои целевые ветки. Третья итерация развивается в `rewrite/v2-recovery` от `rewrite/v2-orders`, где уже находится согласованный реестр. Четвёртая итерация — отдельная ветка `rewrite/v2-lifecycle` от `rewrite/v2-recovery`. Пятая — `rewrite/v2-backtest` от `rewrite/v2-lifecycle`. Шестая — `rewrite/v2-capital` от `rewrite/v2-backtest`, с отдельными коммитами проверки и планирования. Седьмая — `rewrite/v2-reservations` от `rewrite/v2-capital`. Восьмая — `rewrite/v2-rebalance` от `rewrite/v2-reservations`. Девятая — `rewrite/v2-manual` от `rewrite/v2-rebalance`. Десятая — `rewrite/v2-plans` от `rewrite/v2-manual`. Одиннадцатая — `rewrite/v2-deficit` от `rewrite/v2-plans`. Двенадцатая — `rewrite/v2-protection` от `rewrite/v2-deficit`. Тринадцатая — `rewrite/v2-position-protection` от `rewrite/v2-protection`. Четырнадцатая — `rewrite/v2-quik-contract` от `rewrite/v2-position-protection`. Пятнадцатая — `rewrite/v2-quik-durability` от `rewrite/v2-quik-contract`. Шестнадцатая — `rewrite/v2-quik-readonly` от `rewrite/v2-quik-durability`. Семнадцатая — `rewrite/v2-quik-parameters` от `rewrite/v2-quik-readonly`. Восемнадцатая — `rewrite/v2-quik-limits` от `rewrite/v2-quik-parameters`. Девятнадцатая — `rewrite/v2-quik-capital` от `rewrite/v2-quik-limits`. Двадцатая — `rewrite/v2-quik-boundary` от `rewrite/v2-quik-capital`. Двадцать первая — `rewrite/v2-quik-compare` от `rewrite/v2-quik-boundary`. Перенос всей цепочки в `main` остаётся отдельным решением пользователя.
+Достаточно одного репозитория. Новое ядро — `src/trading_system`, проверки — `tests_v2`, примеры — `examples`. Первые три PR (две итерации и реестр use-case) объединены пользователем в свои целевые ветки. Третья итерация развивается в `rewrite/v2-recovery` от `rewrite/v2-orders`, где уже находится согласованный реестр. Четвёртая итерация — отдельная ветка `rewrite/v2-lifecycle` от `rewrite/v2-recovery`. Пятая — `rewrite/v2-backtest` от `rewrite/v2-lifecycle`. Шестая — `rewrite/v2-capital` от `rewrite/v2-backtest`, с отдельными коммитами проверки и планирования. Седьмая — `rewrite/v2-reservations` от `rewrite/v2-capital`. Восьмая — `rewrite/v2-rebalance` от `rewrite/v2-reservations`. Девятая — `rewrite/v2-manual` от `rewrite/v2-rebalance`. Десятая — `rewrite/v2-plans` от `rewrite/v2-manual`. Одиннадцатая — `rewrite/v2-deficit` от `rewrite/v2-plans`. Двенадцатая — `rewrite/v2-protection` от `rewrite/v2-deficit`. Тринадцатая — `rewrite/v2-position-protection` от `rewrite/v2-protection`. Четырнадцатая — `rewrite/v2-quik-contract` от `rewrite/v2-position-protection`. Пятнадцатая — `rewrite/v2-quik-durability` от `rewrite/v2-quik-contract`. Шестнадцатая — `rewrite/v2-quik-readonly` от `rewrite/v2-quik-durability`. Семнадцатая — `rewrite/v2-quik-parameters` от `rewrite/v2-quik-readonly`. Восемнадцатая — `rewrite/v2-quik-limits` от `rewrite/v2-quik-parameters`. Девятнадцатая — `rewrite/v2-quik-capital` от `rewrite/v2-quik-limits`. Двадцатая — `rewrite/v2-quik-boundary` от `rewrite/v2-quik-capital`. Двадцать первая — `rewrite/v2-quik-compare` от `rewrite/v2-quik-boundary`. Двадцать вторая — `rewrite/v2-quik-repair` от `rewrite/v2-quik-compare`. Перенос всей цепочки в `main` остаётся отдельным решением пользователя.
 
 ```sh
 python3 -m venv .venv
@@ -173,6 +178,7 @@ python examples/v2_quik_limits.py
 python examples/v2_quik_capital.py
 python examples/v2_quik_boundary.py
 python examples/v2_quik_compare.py
+python examples/v2_quik_repair.py
 ```
 
 CI проверяет новое ядро на Linux и Windows с Python 3.12: установку пакета, поведенческие тесты, типы и демонстрацию. Старые тесты остаются рядом как материал для сравнения; CI v2 не заявляет о совместимости нового API с прототипом.

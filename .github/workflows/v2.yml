@@ -2,7 +2,7 @@ name: TradingSystem v2
 
 on:
   pull_request:
-    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection, rewrite/v2-position-protection, rewrite/v2-quik-contract, rewrite/v2-quik-durability, rewrite/v2-quik-readonly, rewrite/v2-quik-parameters, rewrite/v2-quik-limits, rewrite/v2-quik-capital, rewrite/v2-quik-boundary]
+    branches: [main, rewrite/v2, rewrite/v2-orders, rewrite/v2-recovery, rewrite/v2-lifecycle, rewrite/v2-backtest, rewrite/v2-capital, rewrite/v2-reservations, rewrite/v2-rebalance, rewrite/v2-manual, rewrite/v2-plans, rewrite/v2-deficit, rewrite/v2-protection, rewrite/v2-position-protection, rewrite/v2-quik-contract, rewrite/v2-quik-durability, rewrite/v2-quik-readonly, rewrite/v2-quik-parameters, rewrite/v2-quik-limits, rewrite/v2-quik-capital, rewrite/v2-quik-boundary, rewrite/v2-quik-compare]
     paths:
       - 'src/**'
       - 'tests_v2/**'
@@ -78,3 +78,5 @@ jobs:
         run: python examples/v2_quik_boundary.py
       - name: QUIK independent comparison demonstration
         run: python examples/v2_quik_compare.py
+      - name: QUIK committed execution repair demonstration
+        run: python examples/v2_quik_repair.py

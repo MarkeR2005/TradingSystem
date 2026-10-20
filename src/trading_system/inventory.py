@@ -3,8 +3,9 @@
 from dataclasses import dataclass
 from datetime import datetime
 from math import fsum, isclose
+import re
 
-from .domain import Execution, OrderSnapshot, OrderStatus, Position, Route, finite, positive, utc
+from .domain import Execution, OrderIntent, OrderSnapshot, OrderStatus, Position, Route, finite, positive, utc
 
 MANUAL = 'manual'
 
@@ -176,4 +177,72 @@ class CloseManual:
         finite(self.limit_price, 'close limit price')
 
 
-type InventoryCommand = InventoryReport | TransferPosition | CloseManual
+@dataclass(frozen=True)
+class RepairOrderTarget:
+    """Observed cumulative facts, without deciding a pending cancellation."""
+
+    order_id: str
+    intent: OrderIntent
+    filled_quantity: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.order_id, str) or not self.order_id or not isinstance(self.intent, OrderIntent):
+            raise ValueError('repair target needs a known order and intent')
+        _quantity(self.intent.route, self.filled_quantity, allow_zero=True)
+        if not 0 <= self.filled_quantity <= self.intent.quantity:
+            raise ValueError('invalid repair cumulative quantity')
+
+
+@dataclass(frozen=True)
+class RepairExecutions:
+    """Journaled positive evidence; never a reconciliation or resume command."""
+
+    operation_id: str
+    expected_revision: int
+    gateway_id: str
+    session_id: str
+    source_revision: int
+    source_digest: str
+    snapshot_digest: str
+    observed_at: datetime
+    created_at: datetime
+    expires_at: datetime
+    executions: tuple[Execution, ...]
+    order_targets: tuple[RepairOrderTarget, ...]
+    observed_positions: tuple[BrokerPosition, ...]
+
+    def __post_init__(self) -> None:
+        _identity(self.operation_id, self.expected_revision)
+        _identity(self.session_id, self.source_revision)
+        if not isinstance(self.gateway_id, str) or not self.gateway_id:
+            raise ValueError('repair gateway is required')
+        for digest in (self.source_digest, self.snapshot_digest):
+            if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+                raise ValueError('repair requires SHA-256 evidence digests')
+        for name in ('observed_at', 'created_at', 'expires_at'):
+            object.__setattr__(self, name, utc(getattr(self, name)))
+        if not self.observed_at <= self.created_at <= self.expires_at or self.observed_at == self.expires_at:
+            raise ValueError('invalid repair observation window')
+        for group, kind in ((self.executions, Execution), (self.order_targets, RepairOrderTarget),
+                            (self.observed_positions, BrokerPosition)):
+            if (not isinstance(group, tuple) or not 0 < len(group) <= 10_000
+                    or not all(isinstance(item, kind) for item in group)):
+                raise ValueError('repair needs bounded nonempty immutable typed tuples')
+        if (len({e.key for e in self.executions}) != len(self.executions)
+                or len({o.order_id for o in self.order_targets}) != len(self.order_targets)
+                or len({p.route for p in self.observed_positions}) != len(self.observed_positions)):
+            raise ValueError('duplicate repair identity')
+        routes = {p.route for p in self.observed_positions}
+        targets = {o.order_id: o for o in self.order_targets}
+        if (any(r.instrument.id.gateway_id != self.gateway_id for r in routes)
+                or any(o.intent.route not in routes for o in self.order_targets)):
+            raise ValueError('repair routes must belong to the observed gateway')
+        for execution in self.executions:
+            target = targets.get(execution.order_id)
+            if (target is None or execution.route != target.intent.route or execution.side != target.intent.side
+                    or execution.timestamp > self.observed_at or not target.intent.accepts_price(execution.price)):
+                raise ValueError('execution contradicts repair target')
+            _quantity(execution.route, execution.quantity)
+
+
+type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions
