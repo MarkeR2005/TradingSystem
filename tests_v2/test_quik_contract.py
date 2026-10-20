@@ -39,6 +39,10 @@ class Quiet(AutoStrategy):
 
 
 class QuikContractTests(TestCase):
+    def test_cancelled_trade_is_not_a_normal_execution(self):
+        with self.assertRaises(ValueError):
+            parse_trade(dict(trade_report(), flags=16), (SPEC,), timedelta(hours=3))
+
     def test_limit_encoding_preserves_integer_ids_and_decimal_price(self):
         transaction = limit_transaction(SPEC, OrderIntent(ROUTE, Side.SELL, 4, 100.5), 42)
         self.assertEqual(transaction, {'TRANS_ID': '42', 'ACTION': 'NEW_ORDER', 'CLASSCODE': 'SPBFUT',
@@ -116,6 +120,17 @@ class QuikReplayTests(IsolatedAsyncioTestCase):
         transaction = await self.submit()
         await self.feed('OnOrder', order_report(transaction))
         return transaction
+
+    async def test_trade_cancellation_blocks_without_silent_duplicate_or_reverse_fill(self):
+        await self.registered()
+        await self.feed('OnTrade', trade_report())
+        before = self.runtime.ledger.positions(), self.runtime.orders.capital_usage()
+        with self.assertRaises(ValueError):
+            await self.gateway.feed('OnTrade', dict(trade_report(), flags=16))
+        await self.runtime.drain()
+        self.assertTrue(self.gateway.blocked)
+        self.assertFalse(self.runtime.orders.ready)
+        self.assertEqual(before, (self.runtime.ledger.positions(), self.runtime.orders.capital_usage()))
 
     async def test_sending_and_intermediate_replies_do_not_accept_or_fill(self):
         transaction = await self.submit()

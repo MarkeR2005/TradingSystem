@@ -18,6 +18,7 @@ from .orders import gateway_recipient
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import QuikOrder, QuikRoute, QuikTrade
 from .quik_replay import QuikReplayGateway, QuikTransaction
+from .quik_compare import BrokerLink, QuikBindings
 from .state import json_object
 from .time import Clock, ManualClock
 
@@ -53,6 +54,13 @@ class _Protocol(QuikReplayGateway):
     @property
     def broker_orders(self) -> tuple[tuple[int, str], ...]:
         return tuple(sorted(self._by_broker.items()))
+
+    def comparison_bindings(self, revision: int) -> QuikBindings:
+        return QuikBindings(self.gateway_id, self.session_id, revision,
+            tuple(BrokerLink(self._orders[local].snapshot.intent.route, number, local)
+                  for number, local in sorted(self._by_broker.items())),
+            tuple(BrokerLink(t.route, number, f'{self.session_id}:{number}')
+                  for number, t in sorted(self._trades.items())))
 
     async def apply(self, payload: dict[str, Any]) -> None:
         op = payload.get('op')
@@ -212,6 +220,11 @@ class QuikDurableGateway:
     @property
     def broker_orders(self) -> tuple[tuple[int, str], ...]:
         return self._engine.broker_orders
+
+    @property
+    def comparison_bindings(self) -> QuikBindings:
+        """Immutable mappings from committed protocol state; no delivery or apply."""
+        return self._engine.comparison_bindings(self._number)
 
     @property
     def unmatched(self) -> tuple[QuikOrder | QuikTrade, ...]:

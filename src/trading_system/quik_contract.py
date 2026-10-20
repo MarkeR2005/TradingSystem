@@ -122,6 +122,8 @@ class QuikTrade:
 def parse_trade(data: Mapping[str, object], specs: tuple[QuikRoute, ...], offset: timedelta) -> QuikTrade:
     spec = route_spec(data, specs)
     flags = integer(data.get('flags'), zero=True)
+    if flags & 16:
+        raise ValueError('cancelled trade requires explicit correction reconciliation')
     commission = sum((decimal(data.get(field)) for field in spec.commission_fields), Decimal())
     return QuikTrade(integer(data.get('trade_num')), integer(data.get('order_num')), spec.route,
                      Side.SELL if flags & 4 else Side.BUY, integer(data.get('qty'), maximum=MAX_TRANSACTION_ID),

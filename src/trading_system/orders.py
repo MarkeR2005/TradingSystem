@@ -19,7 +19,7 @@ from .capital import AccountKey, CapitalPlan, CapitalUsage, _exact, _number
 from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocate_policy, initial_policy
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
-from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, TransferPosition
+from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
@@ -284,6 +284,16 @@ class OrderManager:
 
     def orders(self, strategy_id: str) -> tuple[OrderSnapshot, ...]:
         return tuple(order for order in self._orders.values() if order.strategy_id == strategy_id)
+
+    def observe_gateway(self, gateway_id: str) -> OmsObservation:
+        """Copy immutable records without yielding on the owning event loop."""
+        if gateway_id not in self.gateway_ids:
+            raise ValueError('gateway is not registered')
+        orders = tuple(o for o in self._orders.values() if o.intent.route.instrument.id.gateway_id == gateway_id)
+        return OmsObservation(self._revision, gateway_id, self.clock.now(), orders,
+            tuple(e for e in self._executions.values() if e.route.instrument.id.gateway_id == gateway_id),
+            tuple((owner, p) for owner, p in self.ledger.positions() if p.route.instrument.id.gateway_id == gateway_id),
+            tuple(o.order_id for o in orders if o.order_id in self._local_rejections))
 
     def _invalidate_allocation(self) -> None:
         self._capital_plan = None

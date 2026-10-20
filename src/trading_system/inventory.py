@@ -4,9 +4,35 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import fsum, isclose
 
-from .domain import Execution, OrderSnapshot, OrderStatus, Route, finite, positive, utc
+from .domain import Execution, OrderSnapshot, OrderStatus, Position, Route, finite, positive, utc
 
 MANUAL = 'manual'
+
+
+@dataclass(frozen=True)
+class OmsObservation:
+    """Read-only export at one OMS revision; never an inventory command."""
+
+    revision: int
+    gateway_id: str
+    captured_at: datetime
+    orders: tuple[OrderSnapshot, ...]
+    executions: tuple[Execution, ...]
+    positions: tuple[tuple[str, Position], ...]
+    local_rejections: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.revision) is not int or self.revision < 0 or not self.gateway_id:
+            raise ValueError('observation requires a gateway and nonnegative revision')
+        object.__setattr__(self, 'captured_at', utc(self.captured_at))
+        if (not isinstance(self.orders, tuple) or not all(isinstance(o, OrderSnapshot) for o in self.orders)
+                or not isinstance(self.executions, tuple) or not all(isinstance(e, Execution) for e in self.executions)
+                or not isinstance(self.positions, tuple)
+                or not all(isinstance(p, tuple) and len(p) == 2 and isinstance(p[0], str)
+                           and isinstance(p[1], Position) for p in self.positions)
+                or not isinstance(self.local_rejections, tuple)
+                or not all(isinstance(i, str) for i in self.local_rejections)):
+            raise ValueError('observation requires immutable typed tuples')
 
 
 def _identity(operation_id: str, expected_revision: int) -> None:
