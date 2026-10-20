@@ -20,7 +20,8 @@ async def run_probe(output: Path, *, profile: str, expected_version: str, reques
                     callback_port: int = 34131, class_code: str | None = None, symbol: str | None = None,
                     timeout: float = 10, observe_seconds: float = 2,
                     include_financial: bool = False, include_limits: bool = False,
-                    limit_selection: FuturesLimitKey | None = None) -> tuple[dict[str, Any], int]:
+                    limit_selection: FuturesLimitKey | None = None,
+                    require_callback_fence: bool = False) -> tuple[dict[str, Any], int]:
     if not 0 <= observe_seconds <= 10:
         raise ValueError('observation period must be between zero and ten seconds')
     if limit_selection is not None and (not include_limits or not isinstance(limit_selection, FuturesLimitKey)):
@@ -40,7 +41,8 @@ async def run_probe(output: Path, *, profile: str, expected_version: str, reques
                     await asyncio.sleep(observe_seconds)
                     snapshot = await capture_snapshot(client, class_code=class_code, symbol=symbol,
                                                       include_financial=include_financial, include_limits=include_limits,
-                                                      limit_selection=limit_selection)
+                                                      limit_selection=limit_selection,
+                                                      require_callback_fence=require_callback_fence)
             finally:
                 await client.close()
             if client.fault is not None:
@@ -55,8 +57,20 @@ async def run_probe(output: Path, *, profile: str, expected_version: str, reques
         limits, local_keys = _limit_reports(report['snapshot'])
         _save_json(output / 'limits.json', limits)
         _save_json(output / 'limit-keys.local.json', local_keys)
+    if require_callback_fence and report['status'] == 'captured':
+        _save_json(output / 'boundary.json', _boundary_report(report['snapshot']))
     _save_json(output / 'report.json', report)
     return report, code
+
+
+def _boundary_report(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Export delivery evidence without brokerage tables, keys or amounts."""
+    return {'schema': 1, 'mode': 'read_only', 'runtime': {k: v for k, v in snapshot['runtime'].items()
+                if k in ('profile', 'quik_version', 'lua_version', 'protocol', 'mode', 'callback_cursor')},
+            'connection_id': snapshot['connection_id'], 'started_at': snapshot['started_at'],
+            'finished_at': snapshot['finished_at'], 'callback_boundary': deepcopy(snapshot['callback_boundary']),
+            'issues': list(snapshot['issues']), 'repeatable_observation': snapshot['repeatable_observation'],
+            'reconciled': False}
 
 
 def _save_json(path: Path, value: dict[str, Any]) -> None:
@@ -137,6 +151,8 @@ def main() -> int:
     parser.add_argument('--financial', action='store_true',
                         help='Read five financial parameters twice; requires SPBFUT, a symbol and updated Lua guard')
     parser.add_argument('--limits', action='store_true', help='Analyze futures limits from the two existing table reads')
+    parser.add_argument('--callback-fence', action='store_true',
+                        help='Verify callback delivery around both scans; requires updated Lua guard')
     parser.add_argument('--limit-firm', help='Exact firmid; all four limit key options must be supplied together')
     parser.add_argument('--limit-account', help='Exact trdaccid')
     parser.add_argument('--limit-type', type=int, help='Exact limit_type; verified selection supports type 0')
@@ -157,7 +173,8 @@ def main() -> int:
         report, code = asyncio.run(run_probe(args.output, profile=args.profile, expected_version=args.expect_version,
             request_port=args.request_port, callback_port=args.callback_port, class_code=args.class_code,
             symbol=args.symbol, timeout=args.timeout, observe_seconds=args.observe_seconds,
-            include_financial=args.financial, include_limits=args.limits, limit_selection=selection))
+            include_financial=args.financial, include_limits=args.limits, limit_selection=selection,
+            require_callback_fence=args.callback_fence))
     except (OSError, ValueError) as error:
         print(f'Cannot start/save diagnostic: {error}', file=sys.stderr)
         return 1
@@ -168,6 +185,11 @@ def main() -> int:
         print('Classes: ' + ', '.join(snapshot['classes']))
         print('Rows: ' + ', '.join(f'{name}={len(rows)}' for name, rows in snapshot['tables'].items()))
         print(f"Repeatable observation: {snapshot['repeatable_observation']}; reconciled: False")
+        if snapshot['callback_boundary'] is not None:
+            boundary = snapshot['callback_boundary']
+            print(f"Callback boundary: delivery_verified={boundary['delivery_verified']}; "
+                  f"quiet={boundary['quiet']}; broker_atomic=False")
+            print(f"Boundary report: {args.output / 'boundary.json'}")
         if snapshot['financial'] is not None:
             financial = snapshot['financial']
             values = financial['values']

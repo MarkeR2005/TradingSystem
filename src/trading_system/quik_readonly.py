@@ -8,7 +8,7 @@ import asyncio
 import base64
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 import json
 from math import isfinite
@@ -19,9 +19,10 @@ from uuid import uuid4
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import identifier, integer
 from .quik_parameters import PARAMETER_NAMES
+from .quik_boundary import CURSOR_CAPABILITY, CallbackCursor, CallbackTracker
 
 EMPTY_REQUESTS = frozenset({'tsRuntimeInfo', 'isConnected', 'getClassesList', 'getTradeAccounts',
-    'get_orders', 'get_trades', 'getFuturesClientHoldings', 'getFuturesClientLimits'})
+    'get_orders', 'get_trades', 'getFuturesClientHoldings', 'getFuturesClientLimits', 'tsCallbackCursor'})
 FATAL_CALLBACKS = frozenset({'OnDisconnected', 'OnClose', 'OnStop', 'lua_error'})
 
 
@@ -100,6 +101,7 @@ class ReadOnlyCallback:
     command: str
     received_at: datetime
     data_json: str
+    cursor: CallbackCursor | None = None
 
     @property
     def data(self) -> Any:
@@ -147,6 +149,11 @@ class ReadOnlyQuik:
         self._callback_count = 0
         self._callbacks: deque[ReadOnlyCallback] = deque()
         self._runtime: dict[str, Any] = {}
+        self._cursor_tracker: CallbackTracker | None = None
+        self._cursor_checked = False
+        self._early_cursors: list[CallbackCursor | None] = []
+        self._cursor_progress = asyncio.Event()
+        self._fence_lock = asyncio.Lock()
 
     @property
     def healthy(self) -> bool:
@@ -163,6 +170,63 @@ class ReadOnlyQuik:
     @property
     def callback_count(self) -> int:
         return self._callback_count
+
+    @property
+    def supports_callback_fence(self) -> bool:
+        return self._cursor_tracker is not None
+
+    def _observe_cursor(self, cursor: CallbackCursor | None) -> None:
+        if not self._cursor_checked:
+            if len(self._early_cursors) >= self.max_callbacks:
+                raise ValueError('callback cursor handshake buffer overflow')
+            self._early_cursors.append(cursor)
+        elif self._cursor_tracker is not None:
+            if cursor is None:
+                raise ValueError('callback cursor metadata is required by the bridge capability')
+            self._cursor_tracker.observe(cursor)
+        self._cursor_progress.set()
+
+    def _initialize_cursor(self, info: dict[str, Any]) -> None:
+        capabilities = info.get('capabilities')
+        if isinstance(capabilities, list) and CURSOR_CAPABILITY in capabilities:
+            self._cursor_tracker = CallbackTracker(CallbackCursor.parse(info.get('callback_cursor')))
+        self._cursor_checked = True
+        for cursor in self._early_cursors:
+            self._observe_cursor(cursor)
+        self._early_cursors.clear()
+
+    async def callback_fence(self) -> CallbackCursor:
+        """Wait until all post-baseline frames through a Lua cursor are durable.
+
+        Does not drain the application queue, reconcile OMS or retry. A timeout,
+        disconnect, cancellation, send failure or cursor mismatch quarantines the
+        connection. Another explicit connection is required after any such fault.
+        """
+        if not self.healthy or self._cursor_tracker is None:
+            raise ValueError('callback fence requires a healthy cursor-capable bridge')
+        async with self._fence_lock:
+            try:
+                async with asyncio.timeout(self.timeout):
+                    minimum_sequence = self._cursor_tracker.received_sequence
+                    cursor = CallbackCursor.parse(await self.request('tsCallbackCursor'))
+                    if cursor.sequence < minimum_sequence:
+                        raise ValueError('callback cursor predates frames received before the request')
+                    self._cursor_tracker.target(cursor)
+                    while True:
+                        self._cursor_progress.clear()
+                        if not self.healthy:
+                            raise QuikTransportError(self._fault or 'callback connection closed')
+                        if self._cursor_tracker.received_sequence >= cursor.sequence:
+                            self._record('callback_fence', cursor=asdict(cursor),
+                                         received_sequence=self._cursor_tracker.received_sequence)
+                            return cursor
+                        await self._cursor_progress.wait()
+            except asyncio.CancelledError:
+                self._trip('callback fence cancelled; explicit new connection required')
+                raise
+            except Exception as error:
+                self._trip('callback fence failed; no retry: ' + (str(error) or type(error).__name__))
+                raise QuikTransportError(self._fault) from error
 
     def drain_callbacks(self) -> tuple[ReadOnlyCallback, ...]:
         result = tuple(self._callbacks)
@@ -191,6 +255,7 @@ class ReadOnlyQuik:
                 self._record('fault', reason=reason)
             except Exception:
                 pass
+        self._cursor_progress.set()
         for writer in (self._writer, self._callback_writer):
             if writer is not None:
                 writer.close()
@@ -231,6 +296,7 @@ class ReadOnlyQuik:
                     mismatches.append(f'{field} {label}={_diagnostic_value(required)} observed={actual}')
             if mismatches:
                 raise ValueError('tsRuntimeInfo mismatch: ' + '; '.join(mismatches))
+            self._initialize_cursor(info)
             if await self.request('ping', 'Ping') != 'Pong':
                 raise ValueError('unexpected ping response')
             connected = await self.request('isConnected')
@@ -301,13 +367,15 @@ class ReadOnlyQuik:
             while not self._closed and self._fault is None:
                 frame = await self._frame(reader, 'callback')
                 self._callback_count += 1
+                cursor = CallbackCursor.parse(frame['callback_cursor']) if 'callback_cursor' in frame else None
+                self._observe_cursor(cursor)
                 data = canonical(frame['data'])
                 size = len(data.encode('utf-8')) + len(frame['cmd'].encode('utf-8'))
                 if len(self._callbacks) >= self.max_callbacks or self._callback_bytes + size > self.max_callback_bytes:
                     raise QuikTransportError('callback queue overflow; capture stopped')
                 self._callback_bytes += size
                 self._callbacks.append(ReadOnlyCallback(self._callback_count, frame['cmd'], datetime.now(UTC),
-                                                        data))
+                                                        data, cursor))
                 if frame['cmd'] in FATAL_CALLBACKS:
                     raise QuikTransportError('terminal callback: ' + frame['cmd'])
         except asyncio.CancelledError:
@@ -322,6 +390,7 @@ class ReadOnlyQuik:
         if self._closed:
             return
         self._closed = True
+        self._cursor_progress.set()
         if self._callback_task is not None:
             self._callback_task.cancel()
             await asyncio.gather(self._callback_task, return_exceptions=True)
