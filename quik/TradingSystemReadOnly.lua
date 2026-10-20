@@ -25,8 +25,18 @@ dofile(getScriptPath() .. "\\QuikSharp.lua")
 local qf = require("qsfunctions")
 local dispatch = qf.dispatch_and_process
 local forward_callback = sendCallback
+-- Instance discriminator, not an authentication token. Lua 5.4 seeds its PRNG
+-- on startup. Only the callback thread advances the counters; main only reads.
+local bridge_session = string.format("%08x%08x%08x%08x", math.random(0, 2147483647),
+    math.random(0, 2147483647), math.random(0, 2147483647), math.random(0, 2147483647))
+local callback_sequence, failed_sends = 0, 0
+local MAX_CURSOR = 2147483647
 
-local empty = {tsRuntimeInfo=true, isConnected=true, getClassesList=true, getTradeAccounts=true,
+local function callback_cursor()
+    return {bridge_session=bridge_session, sequence=callback_sequence, failed_sends=failed_sends}
+end
+
+local empty = {tsRuntimeInfo=true, tsCallbackCursor=true, isConnected=true, getClassesList=true, getTradeAccounts=true,
     get_orders=true, get_trades=true, getFuturesClientHoldings=true, getFuturesClientLimits=true}
 local callbacks = {OnOrder=true, OnTrade=true, OnTransReply=true, OnConnected=true, OnDisconnected=true,
     OnFuturesClientHolding=true, OnFuturesLimitChange=true, OnFuturesLimitDelete=true,
@@ -70,7 +80,14 @@ function qf.dispatch_and_process(msg)
     if msg.cmd == "tsRuntimeInfo" then
         msg.data = {protocol=1, mode="read_only", profile=PROFILE,
                     quik_version=getInfoParam("VERSION"), lua_version=_VERSION,
-                    capabilities={"instrument_parameters_v1"}}
+                    capabilities={"instrument_parameters_v1", "callback_cursor_v1"},
+                    callback_cursor=callback_cursor()}
+        return msg
+    end
+    if msg.cmd == "tsCallbackCursor" then
+        -- This response uses the response socket. It never writes to the
+        -- callback socket from main or claims an atomic broker snapshot.
+        msg.data = callback_cursor()
         return msg
     end
     return dispatch(msg)
@@ -79,7 +96,23 @@ end
 -- Diagnostics only needs financial/lifecycle callbacks, not the market tape.
 function sendCallback(msg)
     if type(msg) == "table" and callbacks[msg.cmd] then
-        return forward_callback(msg)
+        if callback_sequence >= MAX_CURSOR then
+            callback_sequence = MAX_CURSOR + 1 -- invalid forever, never wrap
+            return false
+        end
+        callback_sequence = callback_sequence + 1
+        -- A new Python connection starts from its runtime-info baseline. There
+        -- is no delivery guarantee for periods with no connected observer.
+        if not is_connected then return true end
+        local envelope = {}
+        for key, value in pairs(msg) do envelope[key] = value end
+        envelope.callback_cursor = callback_cursor()
+        local ok, sent = pcall(forward_callback, envelope)
+        if not ok or sent ~= true then
+            failed_sends = math.min(failed_sends + 1, MAX_CURSOR + 1)
+            return false
+        end
+        return true
     end
     return true
 end

@@ -1,5 +1,6 @@
 """Independent terminal observations, deliberately NOT an OMS reconciliation command."""
 
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 
@@ -68,9 +69,12 @@ async def _date(client: ReadOnlyQuik) -> str:
 async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = None,
                            symbol: str | None = None, include_financial: bool = False,
                            include_limits: bool = False,
-                           limit_selection: FuturesLimitKey | None = None) -> dict[str, Any]:
+                           limit_selection: FuturesLimitKey | None = None,
+                           require_callback_fence: bool = False) -> dict[str, Any]:
     if not client.healthy:
         raise SnapshotError('connect and validate the read-only terminal first')
+    if require_callback_fence and not client.supports_callback_fence:
+        raise SnapshotError('callback fence unavailable; update and restart TradingSystemReadOnly.lua')
     if symbol is not None and class_code is None:
         raise SnapshotError('instrument lookup requires an explicit class')
     if limit_selection is not None and (not include_limits or not isinstance(limit_selection, FuturesLimitKey)):
@@ -86,6 +90,7 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
         if value is not None:
             identifier(value)
     started = datetime.now(UTC).isoformat()
+    begin_cursor = await client.callback_fence() if require_callback_fence else None
     callbacks_before = client.callback_count
     await _connected(client)
     date_before = await _date(client)
@@ -119,6 +124,12 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
         passes.append(observed)
     date_after = await _date(client)
     await _connected(client)
+    end_cursor = await client.callback_fence() if require_callback_fence else None
+    boundary = None
+    if begin_cursor is not None and end_cursor is not None:
+        boundary = {'schema': 1, 'kind': 'transport_cursor', 'begin': asdict(begin_cursor), 'end': asdict(end_cursor),
+                    'scope': 'after_connection_baseline', 'delivery_verified': True,
+                    'quiet': begin_cursor == end_cursor, 'broker_atomic': False}
     issues = []
     if canonical(passes[0]) != canonical(passes[1]):
         issues.append('tables_changed')
@@ -126,6 +137,8 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
         issues.append('trading_date_changed')
     if client.callback_count != callbacks_before:
         issues.append('callbacks_during_scan')
+    if boundary is not None and not boundary['quiet']:
+        issues.append('bridge_callbacks_during_scan')
     financial = None
     if include_financial:
         financial = build_financial_report(security_reads[0], parameter_reads[0],
@@ -159,6 +172,7 @@ async def capture_snapshot(client: ReadOnlyQuik, *, class_code: str | None = Non
             'financial': financial, 'limits': limits,
             'tables': passes[-1], 'previous_tables': passes[0], 'issues': issues,
             'callbacks_before': callbacks_before, 'callbacks_after': client.callback_count,
+            'callback_boundary': boundary,
             'repeatable_observation': not issues, 'reconciled': False,
             'limitation': 'Two reads are not an atomic broker cutover and never authorize trading or capital changes.'}
 

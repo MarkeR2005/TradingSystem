@@ -20,7 +20,7 @@ class LuaReadOnlyTests(TestCase):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.globals().script_directory = str(self.script_directory)
         lua.execute('''
-            called = {}; callbacks = {}; ran = false
+            called = {}; callbacks = {}; ran = false; is_connected = true
             function getScriptPath() return script_directory end
             function getInfoParam(name) return '13.2.0.1' end
             function dofile(path) loaded_path = path end
@@ -67,7 +67,58 @@ class LuaReadOnlyTests(TestCase):
         self.assertEqual((response['protocol'], response['profile'], response['lua_version'], response['mode']),
                          (1, 'demo-quik', 'Lua 5.4', 'read_only'))
         self.assertEqual(len(lua.globals().called), 0)
-        self.assertEqual(list(response['capabilities'].values()), ['instrument_parameters_v1'])
+        self.assertEqual(list(response['capabilities'].values()), ['instrument_parameters_v1', 'callback_cursor_v1'])
+
+    def test_cursor_is_stable_per_script_and_is_not_a_callback(self):
+        lua = self.load()
+        initial = self.request(lua, 'tsRuntimeInfo')['data']['callback_cursor']
+        current = self.request(lua, 'tsCallbackCursor')['data']
+        self.assertRegex(initial['bridge_session'], r'^[0-9a-f]{32}$')
+        self.assertEqual(dict(initial), dict(current))
+        self.assertEqual(current['sequence'], 0)
+        self.assertEqual(current['failed_sends'], 0)
+        self.assertEqual(len(lua.globals().callbacks), 0)
+        self.assertEqual(len(lua.globals().called), 0)
+
+    def test_financial_callbacks_get_monotonic_metadata_without_mutating_input(self):
+        lua = self.load()
+        lua.execute('original = {cmd="OnTrade",data={trade_num=123}}; sendCallback(original)')
+        lua.execute('sendCallback({cmd="OnOrder",data={}})')
+        first, second = lua.globals().callbacks[1], lua.globals().callbacks[2]
+        self.assertEqual(first['callback_cursor']['sequence'], 1)
+        self.assertEqual(second['callback_cursor']['sequence'], 2)
+        self.assertEqual(first['callback_cursor']['bridge_session'], second['callback_cursor']['bridge_session'])
+        self.assertEqual(self.request(lua, 'tsCallbackCursor')['data']['sequence'], 2)
+        self.assertIsNone(lua.globals().original['callback_cursor'])
+
+    def test_ignored_market_noise_does_not_advance_cursor(self):
+        lua = self.load()
+        lua.execute('sendCallback({cmd="OnAllTrade",data={}}); sendCallback({cmd="OnQuote",data={}})')
+        self.assertEqual(self.request(lua, 'tsCallbackCursor')['data']['sequence'], 0)
+
+    def test_failed_or_throwing_callback_send_is_visible_without_error_details(self):
+        for implementation in ('return nil', 'error("private-account-details")'):
+            lua = self.runtime()
+            lua.execute('function sendCallback(msg) ' + implementation + ' end')
+            lua.execute(SCRIPT.read_text())
+            self.assertFalse(lua.eval('sendCallback({cmd="OnTrade",data={}})'))
+            value = self.request(lua, 'tsCallbackCursor')['data']
+            self.assertEqual(value['sequence'], 1)
+            self.assertEqual(value['failed_sends'], 1)
+            self.assertNotIn('private-account-details', str(dict(value)))
+
+    def test_disconnected_period_is_outside_next_connection_delivery_baseline(self):
+        lua = self.load()
+        lua.execute('is_connected = false; sendCallback({cmd="OnTrade",data={}})')
+        self.assertEqual(len(lua.globals().callbacks), 0)
+        value = self.request(lua, 'tsCallbackCursor')['data']
+        self.assertEqual((value['sequence'], value['failed_sends']), (1, 0))
+
+    def test_cursor_requires_empty_argument_and_keeps_trade_commands_blocked(self):
+        lua = self.load()
+        self.assertEqual(self.request(lua, 'tsCallbackCursor', 'anything')['cmd'], 'lua_error')
+        self.assertEqual(self.request(lua, 'sendTransaction')['cmd'], 'lua_error')
+        self.assertEqual(len(lua.globals().called), 0)
 
     def test_local_profile_survives_loading_unmodified_wrapper_and_preserves_read_only(self):
         for contents in (b'psb-live', b'psb-live\n', b'psb-live\r\n', b'\xef\xbb\xbfpsb-live\r\n'):

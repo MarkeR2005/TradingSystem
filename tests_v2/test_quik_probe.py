@@ -29,6 +29,29 @@ class ProbeTests(IsolatedAsyncioTestCase):
         self.server.responses['getSecurityInfo'] = security()
         self.server.parameters = parameters()
 
+    async def test_callback_boundary_export_is_small_and_excludes_account_tables(self):
+        cursor = {'bridge_session': 'a' * 32, 'sequence': 0, 'failed_sends': 0}
+        self.server.responses['tsRuntimeInfo'].update(capabilities=['callback_cursor_v1'], callback_cursor=cursor)
+        self.server.responses['tsCallbackCursor'] = cursor
+        report, code = await self.probe(require_callback_fence=True)
+        self.assertEqual(code, 0, report.get('error'))
+        exported = json.loads((self.path / 'boundary.json').read_text(encoding='utf-8'))
+        self.assertTrue(exported['callback_boundary']['delivery_verified'])
+        self.assertTrue(exported['callback_boundary']['quiet'])
+        self.assertFalse(exported['callback_boundary']['broker_atomic'])
+        self.assertFalse(exported['reconciled'])
+        self.assertNotIn('tables', exported)
+        self.assertNotIn('trdaccid', json.dumps(exported))
+        self.assertEqual(exported['callback_boundary'], report['snapshot']['callback_boundary'])
+
+    async def test_unsupported_callback_boundary_fails_without_silent_fallback(self):
+        report, code = await self.probe(require_callback_fence=True)
+        self.assertEqual(code, 1)
+        self.assertIn('update and restart', report['error'])
+        self.assertNotIn('snapshot', report)
+        self.assertFalse((self.path / 'boundary.json').exists())
+        self.assertNotIn('getTradeAccounts', [r['cmd'] for r in self.server.requests])
+
     async def test_financial_export_excludes_account_tables(self):
         self.financial_terminal()
         report, code = await self.probe(class_code='SPBFUT', symbol='SiZ6', include_financial=True)
