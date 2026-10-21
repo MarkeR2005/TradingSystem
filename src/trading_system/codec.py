@@ -17,6 +17,7 @@ from .plans import (AcknowledgePlan, CheckPlanDeadlines, ClosePlan, FailurePolic
                     TrailingStop, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection)
 from .inventory import BrokerPosition, CloseManual, ExternalOrder, InventoryReport, OpeningBalance, TransferPosition
 from .inventory import RepairExecutions, RepairOrderTarget
+from .inventory import ResolveOrders, ResolvedOrderTarget
 from .capital import AccountCapital, AccountKey
 from .admission import (
     AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
@@ -25,6 +26,7 @@ from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCa
 
 _TYPES = {cls.__name__: cls for cls in (
     RepairExecutions, RepairOrderTarget,
+    ResolveOrders, ResolvedOrderTarget,
     PlanProtection, TrailingStop, UpdatePlanProtection, ProtectPositions, ReleasePositionProtection,
     AcknowledgeDeficit, CheckDeficits, DeficitQuotes, RetryDeficit, StartDeficit,
     AcknowledgePlan, CheckPlanDeadlines, ClosePlan, PlanLeg, PlanMarks, PlanPrice, RetryPlan, SubmitPlan, TradePlan,

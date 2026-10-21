@@ -20,6 +20,7 @@ from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocat
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition, RepairExecutions
+from .inventory import ResolveOrders
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
@@ -142,12 +143,12 @@ class OrderManager:
         self.ledger.adopt(candidate.ledger)
 
     async def handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
-        if isinstance(message, RepairExecutions):
-            raise ValueError('execution repair requires the durable gateway evidence guard')
+        if isinstance(message, (RepairExecutions, ResolveOrders)):
+            raise ValueError('repair requires the durable gateway evidence guard')
         async with self._transition_lock:
             await self._transition(message)
 
-    async def _apply_guarded_repair(self, command: RepairExecutions, verify_source: Callable[[], None]) -> None:
+    async def _apply_guarded_repair(self, command: RepairExecutions | ResolveOrders, verify_source: Callable[[], None]) -> None:
         async with self._transition_lock:
             if self._failed_after_commit:
                 raise JournalError('durable transition could not be delivered; restart required')
@@ -176,7 +177,7 @@ class OrderManager:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
         if self._plans.duplicate(message) or self._deficits.duplicate(message):
             return
-        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions)):
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions, ResolveOrders)):
             previous = self._inventory_operations.get(message.operation_id)
             if previous is not None:
                 if previous != message:
@@ -447,6 +448,9 @@ class OrderManager:
         return None
 
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, ResolveOrders):
+            await self._resolve_orders(message)
+            return  # This operator decision does not advance plans or deficits.
         if isinstance(message, RepairExecutions):
             await self._repair_executions(message)
             return  # No cancellation, plan or deficit policy decisions in a repair.
@@ -831,6 +835,62 @@ class OrderManager:
             raise ValueError('rejection contradicts existing order state')
         self._cancellations.pop(order.order_id, None)
         await self._update(replace(order, status=OrderStatus.REJECTED, rejection_reason=message.reason))
+
+    async def _resolve_orders(self, command: ResolveOrders) -> None:
+        if command.expected_revision != self._revision:
+            raise ValueError('OMS revision changed; rebuild order resolution')
+        if not command.created_at <= self.clock.now() <= command.expires_at:
+            raise ValueError('order resolution is not current')
+        view = self.observe_gateway(command.gateway_id)
+        if command.gateway_id in self._inventory_gateways:
+            raise ValueError('inventory cutovers require a separate order recovery')
+        local = {o.order_id: o for o in view.orders if o.order_id not in view.local_rejections}
+        targets = {o.order_id: o for o in command.order_targets}
+        if set(targets) != set(local):
+            raise ValueError('order resolution coverage changed')
+        abandoned = set()
+        for outcome in command.outcomes:
+            order = local.get(outcome.order_id)
+            if order is None or order.status not in (OrderStatus.SUBMITTED, OrderStatus.CANCEL_PENDING):
+                raise ValueError('resolution requires a known unresolved order')
+            if self._plans.active(order.strategy_id) or self._deficits.owns_route(order.intent.route):
+                raise ValueError('active plan, protection or deficit requires separate recovery')
+            if isinstance(outcome, GatewayCancelled):
+                if order.filled_quantity != outcome.filled_quantity:
+                    raise ValueError('cancel barrier awaits missing executions')
+                pending = self._cancellations.get(order.order_id)
+                if pending is not None and pending.replacement is not None:
+                    abandoned.add(order.order_id)
+        if abandoned != set(command.abandon_replacements):
+            raise ValueError('pending replacement needs an exact explicit abandonment decision')
+        self._unreconciled.add(command.gateway_id)
+        self._invalidate_allocation()
+        for outcome in command.outcomes:
+            if isinstance(outcome, GatewayAccepted):
+                await self._accepted(outcome)
+            elif isinstance(outcome, GatewayRejected):
+                await self._rejected(outcome)
+            else:
+                if outcome.order_id in abandoned:
+                    self._cancellations[outcome.order_id].replacement = None
+                await self._cancel_response(outcome)
+                if isinstance(outcome, GatewayCancelled):
+                    # A known barrier may have waited for fills repaired in a prior command.
+                    await self._finish_cancel(outcome.order_id)
+        for order_id, target in targets.items():
+            actual = self._orders[order_id]
+            if (actual.intent, actual.filled_quantity, actual.status) != (target.intent, target.filled_quantity, target.status):
+                raise ValueError('resolved order differs from observed target')
+        observed = {p.route: _exact(p.quantity) for p in command.observed_positions}
+        totals = dict.fromkeys(observed, Fraction())
+        for _, position in self.ledger.positions():
+            if position.route.instrument.id.gateway_id == command.gateway_id:
+                if position.route not in totals:
+                    raise ValueError('resolution position outside observed scope')
+                totals[position.route] += _exact(position.quantity)
+        if totals != observed:
+            raise ValueError('resolution net positions differ from observation')
+        self._inventory_operations[command.operation_id] = command
 
     async def _repair_executions(self, command: RepairExecutions) -> None:
         if command.expected_revision != self._revision:
