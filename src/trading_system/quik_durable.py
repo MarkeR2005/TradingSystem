@@ -15,12 +15,13 @@ from . import codec
 from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
 from .events import EventBus
 from .orders import OrderManager, gateway_recipient
-from .inventory import RepairExecutions
+from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import QuikOrder, QuikRoute, QuikTrade
 from .quik_replay import QuikReplayGateway, QuikTransaction
 from .quik_compare import BrokerLink, QuikBindings
 from .quik_repair import ExecutionEvidence, missing_suffix
+from .quik_outcomes import OrderEvidence, select_order_outcomes
 from .state import json_object
 from .time import Clock, ManualClock
 
@@ -38,9 +39,12 @@ class _Protocol(QuikReplayGateway):
                          first_transaction_id=first_transaction_id, response_timeout=response_timeout,
                          max_unmatched=max_unmatched)
         self.outputs: list[Message] = []
+        self.outcomes: list[OrderOutcome] = []
 
     async def _publish(self, message: Message) -> None:
         self.outputs.append(message)
+        if isinstance(message, OUTCOME_TYPES):
+            self.outcomes.append(message)
 
     def fork(self, at: datetime) -> '_Protocol':
         clock = ManualClock(self.clock.now())
@@ -256,6 +260,31 @@ class QuikDurableGateway:
                     raise ValueError('execution source changed; rebuild repair')
                 if command.executions != missing_suffix(evidence, oms.observe_gateway(self.gateway_id)):
                     raise ValueError('repair payload differs from the committed missing suffix')
+
+            await oms._apply_guarded_repair(command, verify_source)
+
+    @property
+    def order_evidence(self) -> OrderEvidence:
+        return OrderEvidence(self.execution_evidence, tuple(self._engine.outcomes))
+
+    async def apply_order_resolution(self, command: ResolveOrders, oms: OrderManager) -> None:
+        """Apply saved outcomes; replacement abandonment must be named explicitly."""
+        if not isinstance(command, ResolveOrders):
+            raise ValueError('expected an order resolution command')
+        if self._bus is None or oms.bus is not self._bus:
+            raise ValueError('resolution requires the attached OMS event bus')
+        await self._bus.drain()
+        async with self._lock:
+            def verify_source() -> None:
+                if (not self._started or self._failed or not self.journal.writable or self.journal.degraded
+                        or self.journal.record_count != self._tail):
+                    raise JournalError('order source is unavailable; restart and inspect its journal')
+                evidence = self.order_evidence
+                if (command.gateway_id, command.session_id, command.source_revision, command.source_digest) != (
+                        self.gateway_id, self._engine.session_id, self._number, evidence.digest):
+                    raise ValueError('order source changed; rebuild resolution')
+                if command.outcomes != select_order_outcomes(evidence, oms.observe_gateway(self.gateway_id)):
+                    raise ValueError('resolution payload differs from committed outcomes')
 
             await oms._apply_guarded_repair(command, verify_source)
 

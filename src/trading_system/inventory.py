@@ -6,6 +6,7 @@ from math import fsum, isclose
 import re
 
 from .domain import Execution, OrderIntent, OrderSnapshot, OrderStatus, Position, Route, finite, positive, utc
+from .domain import GatewayAccepted, GatewayRejected, GatewayCancelled, GatewayCancelRejected
 
 MANUAL = 'manual'
 
@@ -245,4 +246,69 @@ class RepairExecutions:
             _quantity(execution.route, execution.quantity)
 
 
-type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions
+type OrderOutcome = GatewayAccepted | GatewayRejected | GatewayCancelled | GatewayCancelRejected
+OUTCOME_TYPES = (GatewayAccepted, GatewayRejected, GatewayCancelled, GatewayCancelRejected)
+
+
+@dataclass(frozen=True)
+class ResolvedOrderTarget(RepairOrderTarget):
+    status: OrderStatus
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.status, OrderStatus) or self.status in (OrderStatus.SUBMITTED, OrderStatus.CANCEL_PENDING):
+            raise ValueError('resolution target must have a known outcome')
+
+
+@dataclass(frozen=True)
+class ResolveOrders:
+    """Apply saved acknowledgements; abandoning a replacement is an explicit decision."""
+
+    operation_id: str
+    expected_revision: int
+    gateway_id: str
+    session_id: str
+    source_revision: int
+    source_digest: str
+    snapshot_digest: str
+    observed_at: datetime
+    created_at: datetime
+    expires_at: datetime
+    outcomes: tuple[OrderOutcome, ...]
+    order_targets: tuple[ResolvedOrderTarget, ...]
+    observed_positions: tuple[BrokerPosition, ...]
+    abandon_replacements: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _identity(self.operation_id, self.expected_revision)
+        _identity(self.session_id, self.source_revision)
+        if not isinstance(self.gateway_id, str) or not self.gateway_id:
+            raise ValueError('resolution gateway is required')
+        for digest in (self.source_digest, self.snapshot_digest):
+            if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+                raise ValueError('resolution requires SHA-256 evidence digests')
+        for name in ('observed_at', 'created_at', 'expires_at'):
+            object.__setattr__(self, name, utc(getattr(self, name)))
+        if not self.observed_at <= self.created_at <= self.expires_at or self.observed_at == self.expires_at:
+            raise ValueError('invalid resolution observation window')
+        for group, kind in ((self.outcomes, OUTCOME_TYPES), (self.order_targets, ResolvedOrderTarget),
+                            (self.observed_positions, BrokerPosition)):
+            if (not isinstance(group, tuple) or not 0 < len(group) <= 10_000
+                    or not all(isinstance(item, kind) for item in group)):
+                raise ValueError('resolution requires bounded immutable typed tuples')
+        targets = {o.order_id: o for o in self.order_targets}
+        routes = {p.route for p in self.observed_positions}
+        if (len(targets) != len(self.order_targets) or len(routes) != len(self.observed_positions)
+                or len(set(self.outcomes)) != len(self.outcomes)
+                or any(r.instrument.id.gateway_id != self.gateway_id for r in routes)
+                or any(o.intent.route not in routes for o in self.order_targets)
+                or any(m.gateway_id != self.gateway_id or m.order_id not in targets for m in self.outcomes)):
+            raise ValueError('ambiguous or foreign resolution scope')
+        if (not isinstance(self.abandon_replacements, tuple)
+                or not all(isinstance(i, str) and i for i in self.abandon_replacements)
+                or len(set(self.abandon_replacements)) != len(self.abandon_replacements)
+                or not set(self.abandon_replacements) <= {m.order_id for m in self.outcomes if isinstance(m, GatewayCancelled)}):
+            raise ValueError('replacement decision must name distinct confirmed cancellations')
+
+
+type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions | ResolveOrders
