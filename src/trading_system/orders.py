@@ -20,7 +20,7 @@ from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocat
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition, RepairExecutions
-from .inventory import ResolveOrders
+from .inventory import ResolveOrders, StageExternalInventory
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
@@ -70,6 +70,7 @@ class OrderManager:
         self._inventory_operations: dict[str, InventoryCommand] = {}
         self._inventory_gateways: dict[str, datetime] = {}
         self._inventory_cutoffs: dict[str, datetime] = {}
+        self._inventory_pending: set[str] = set()
         self._capital_required = require_capital
         self._capital_refreshed = not require_capital
         self._capital_policy: CapitalPolicy | None = None
@@ -96,7 +97,7 @@ class OrderManager:
 
     @property
     def ready(self) -> bool:
-        return (self._capital_refreshed and not self._unreconciled
+        return (self._capital_refreshed and not self._unreconciled and not self._inventory_pending
                 and not self._storage_blocked and not self._failed_after_commit
                 and (self.journal is None or (self.journal.writable and not self.journal.degraded)))
 
@@ -107,6 +108,7 @@ class OrderManager:
         candidate._inventory_operations = self._inventory_operations.copy()
         candidate._inventory_gateways = self._inventory_gateways.copy()
         candidate._inventory_cutoffs = self._inventory_cutoffs.copy()
+        candidate._inventory_pending = self._inventory_pending.copy()
         candidate._capital_required = self._capital_required
         candidate._capital_refreshed = self._capital_refreshed
         candidate._capital_policy = self._capital_policy
@@ -128,6 +130,7 @@ class OrderManager:
         self._inventory_operations = candidate._inventory_operations
         self._inventory_gateways = candidate._inventory_gateways
         self._inventory_cutoffs = candidate._inventory_cutoffs
+        self._inventory_pending = candidate._inventory_pending
         self._capital_required = candidate._capital_required
         self._capital_refreshed = candidate._capital_refreshed
         self._capital_policy = candidate._capital_policy
@@ -143,12 +146,13 @@ class OrderManager:
         self.ledger.adopt(candidate.ledger)
 
     async def handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
-        if isinstance(message, (RepairExecutions, ResolveOrders)):
-            raise ValueError('repair requires the durable gateway evidence guard')
+        if isinstance(message, (RepairExecutions, ResolveOrders, StageExternalInventory)):
+            raise ValueError('recovery command requires the durable gateway evidence guard')
         async with self._transition_lock:
             await self._transition(message)
 
-    async def _apply_guarded_repair(self, command: RepairExecutions | ResolveOrders, verify_source: Callable[[], None]) -> None:
+    async def _apply_guarded_repair(self, command: RepairExecutions | ResolveOrders | StageExternalInventory,
+                                  verify_source: Callable[[], None]) -> None:
         async with self._transition_lock:
             if self._failed_after_commit:
                 raise JournalError('durable transition could not be delivered; restart required')
@@ -158,7 +162,7 @@ class OrderManager:
                     raise ValueError('operation identifier has conflicting contents')
                 return
             if self.journal is None or not self.journal.writable or self.journal.degraded:
-                raise JournalError('execution repair requires a healthy durable OMS journal')
+                raise JournalError('recovery command requires a healthy durable OMS journal')
             verify_source()
             await self._transition(command)
 
@@ -177,7 +181,7 @@ class OrderManager:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
         if self._plans.duplicate(message) or self._deficits.duplicate(message):
             return
-        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions, ResolveOrders)):
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions, ResolveOrders, StageExternalInventory)):
             previous = self._inventory_operations.get(message.operation_id)
             if previous is not None:
                 if previous != message:
@@ -302,6 +306,12 @@ class OrderManager:
     def orders(self, strategy_id: str) -> tuple[OrderSnapshot, ...]:
         return tuple(order for order in self._orders.values() if order.strategy_id == strategy_id)
 
+    def external_inventory_review(self, operation_id: str) -> StageExternalInventory:
+        review = self._inventory_operations[operation_id]
+        if not isinstance(review, StageExternalInventory):
+            raise ValueError('operation is not an external inventory review')
+        return review
+
     def observe_gateway(self, gateway_id: str) -> OmsObservation:
         """Copy immutable records without yielding on the owning event loop."""
         if gateway_id not in self.gateway_ids:
@@ -318,6 +328,8 @@ class OrderManager:
         self._capital_refreshed = False
 
     async def _inventory_report(self, command: InventoryReport) -> None:
+        if command.gateway_id in self._inventory_pending:
+            raise ValueError('staged external inventory requires broker cutover adoption, not a legacy report')
         if self._deficits.active() is not None and (command.openings or command.imports):
             raise ValueError('new inventory must wait until deficit recovery is acknowledged')
         if self._plans.active(MANUAL) and (command.openings or command.imports):
@@ -382,7 +394,7 @@ class OrderManager:
             raise ValueError('deficit recovery locks affected ownership')
         if self._plans.active(command.source_id) or self._plans.active(command.target_id):
             raise ValueError('finish active plans before transferring ownership')
-        if self._unreconciled or self._storage_blocked:
+        if self._unreconciled or self._storage_blocked or self._inventory_pending:
             raise RuntimeError('ownership transfer requires reconciled inventory and healthy storage')
         policy = self._capital_policy
         if command.target_id != MANUAL and (policy is None or not any(
@@ -448,6 +460,16 @@ class OrderManager:
         return None
 
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, StageExternalInventory):
+            if message.expected_revision != self._revision or message.gateway_id not in self.gateway_ids:
+                raise ValueError('inventory review scope or OMS revision changed')
+            if not message.created_at <= self.clock.now() <= message.expires_at:
+                raise ValueError('inventory review is not current')
+            self._inventory_operations[message.operation_id] = message
+            self._inventory_pending.add(message.gateway_id)
+            self._unreconciled.add(message.gateway_id)
+            self._invalidate_allocation()
+            return  # No financial import, callbacks, plan or deficit actions.
         if isinstance(message, ResolveOrders):
             await self._resolve_orders(message)
             return  # This operator decision does not advance plans or deficits.

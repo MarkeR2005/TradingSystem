@@ -8,6 +8,7 @@ The caller owns the dedicated DurableJournal and must keep it open.
 import asyncio
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,13 +16,14 @@ from . import codec
 from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
 from .events import EventBus
 from .orders import OrderManager, gateway_recipient
-from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders
+from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders, StageExternalInventory
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import QuikOrder, QuikRoute, QuikTrade
 from .quik_replay import QuikReplayGateway, QuikTransaction
-from .quik_compare import BrokerLink, QuikBindings
+from .quik_compare import BrokerLink, ComparisonPolicy, QuikBindings
 from .quik_repair import ExecutionEvidence, missing_suffix
 from .quik_outcomes import OrderEvidence, select_order_outcomes
+from .quik_inventory import build_external_inventory_plan
 from .state import json_object
 from .time import Clock, ManualClock
 
@@ -285,6 +287,27 @@ class QuikDurableGateway:
                     raise ValueError('order source changed; rebuild resolution')
                 if command.outcomes != select_order_outcomes(evidence, oms.observe_gateway(self.gateway_id)):
                     raise ValueError('resolution payload differs from committed outcomes')
+
+            await oms._apply_guarded_repair(command, verify_source)
+
+    async def stage_external_inventory(self, command: StageExternalInventory, oms: OrderManager,
+                                       raw: dict[str, Any], policy: ComparisonPolicy) -> None:
+        """Revalidate and save a review. Does not bind external orders or import inventory."""
+        if not isinstance(command, StageExternalInventory):
+            raise ValueError('expected an external inventory review')
+        if self._bus is None or oms.bus is not self._bus:
+            raise ValueError('inventory review requires the attached OMS event bus')
+        await self._bus.drain()
+        async with self._lock:
+            def verify_source() -> None:
+                if (not self._started or self._failed or not self.journal.writable or self.journal.degraded
+                        or self.journal.record_count != self._tail):
+                    raise JournalError('inventory source is unavailable; restart and inspect its journal')
+                rebuilt = build_external_inventory_plan(command.operation_id, raw, policy,
+                    oms.observe_gateway(self.gateway_id), self.order_evidence, position_basis=command.position_basis,
+                    order_origins=command.order_origins, now=oms.clock.now(), current_revision=oms.revision)
+                if replace(rebuilt, created_at=command.created_at) != command:
+                    raise ValueError('inventory evidence or proposed contents changed; rebuild review')
 
             await oms._apply_guarded_repair(command, verify_source)
 

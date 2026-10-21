@@ -311,4 +311,117 @@ class ResolveOrders:
             raise ValueError('replacement decision must name distinct confirmed cancellations')
 
 
-type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions | ResolveOrders
+@dataclass(frozen=True)
+class InventoryProvenance:
+    """Operator-declared source for the untracked inventory, not an authenticity proof."""
+
+    owner_id: str
+    as_of: datetime
+    reference: str
+    digest: str
+
+    def __post_init__(self) -> None:
+        if self.owner_id != MANUAL:
+            raise ValueError('external inventory must first belong to manual')
+        object.__setattr__(self, 'as_of', utc(self.as_of))
+        if not isinstance(self.reference, str) or not 0 < len(self.reference.strip()) <= 500:
+            raise ValueError('inventory source reference is required')
+        if not isinstance(self.digest, str) or re.fullmatch('[0-9a-f]{64}', self.digest) is None:
+            raise ValueError('inventory source requires a SHA-256 digest')
+
+
+@dataclass(frozen=True)
+class ExternalPositionBasis:
+    opening: OpeningBalance
+    provenance: InventoryProvenance
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.opening, OpeningBalance) or not isinstance(self.provenance, InventoryProvenance):
+            raise ValueError('external residual needs explicit cost basis and provenance')
+
+
+@dataclass(frozen=True)
+class ExternalOrderOrigin:
+    route: Route
+    broker_order_id: int
+    submitted_at: datetime
+    provenance: InventoryProvenance
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.route, Route) or not isinstance(self.provenance, InventoryProvenance)
+                or type(self.broker_order_id) is not int or not 0 < self.broker_order_id < 2**63):
+            raise ValueError('external order requires an exact broker identity and provenance')
+        object.__setattr__(self, 'submitted_at', utc(self.submitted_at))
+        if self.submitted_at > self.provenance.as_of:
+            raise ValueError('external order origin is later than observation')
+
+
+@dataclass(frozen=True)
+class StageExternalInventory:
+    """A durable review only. Financial adoption needs a separate broker cutover."""
+
+    operation_id: str
+    expected_revision: int
+    gateway_id: str
+    session_id: str
+    source_revision: int
+    source_digest: str
+    snapshot_digest: str
+    observed_at: datetime
+    created_at: datetime
+    expires_at: datetime
+    position_basis: tuple[ExternalPositionBasis, ...]
+    order_origins: tuple[ExternalOrderOrigin, ...]
+    imports: tuple[ExternalOrder, ...]
+    observed_positions: tuple[BrokerPosition, ...]
+
+    def __post_init__(self) -> None:
+        _identity(self.operation_id, self.expected_revision)
+        _identity(self.session_id, self.source_revision)
+        if not isinstance(self.gateway_id, str) or not self.gateway_id:
+            raise ValueError('external inventory gateway is required')
+        for digest in (self.source_digest, self.snapshot_digest):
+            if not isinstance(digest, str) or re.fullmatch('[0-9a-f]{64}', digest) is None:
+                raise ValueError('inventory review requires SHA-256 evidence digests')
+        for name in ('observed_at', 'created_at', 'expires_at'):
+            object.__setattr__(self, name, utc(getattr(self, name)))
+        if not self.observed_at <= self.created_at <= self.expires_at or self.observed_at == self.expires_at:
+            raise ValueError('invalid inventory review observation window')
+        for group, kind in ((self.position_basis, ExternalPositionBasis), (self.order_origins, ExternalOrderOrigin),
+                            (self.imports, ExternalOrder), (self.observed_positions, BrokerPosition)):
+            if (not isinstance(group, tuple) or len(group) > 10_000
+                    or not all(isinstance(item, kind) for item in group)):
+                raise ValueError('inventory review requires bounded immutable typed tuples')
+        if not self.observed_positions or not (self.position_basis or self.imports):
+            raise ValueError('empty inventory proposal')
+        routes = {p.route for p in self.observed_positions}
+        if (len(routes) != len(self.observed_positions)
+                or any(r.instrument.id.gateway_id != self.gateway_id for r in routes)
+                or len({p.opening.route for p in self.position_basis}) != len(self.position_basis)
+                or len({o.broker_order_id for o in self.order_origins}) != len(self.order_origins)
+                or len({o.order.order_id for o in self.imports}) != len(self.imports)
+                or len(self.order_origins) != len(self.imports)):
+            raise ValueError('ambiguous external inventory scope')
+        if any(p.opening.route not in routes or p.provenance.as_of != self.observed_at for p in self.position_basis):
+            raise ValueError('position provenance must describe the observed residual at its boundary')
+        for origin, item in zip(self.order_origins, self.imports, strict=True):
+            if (origin.route not in routes or origin.provenance.as_of != self.observed_at
+                    or item.order.strategy_id != MANUAL or item.order.intent.route != origin.route
+                    or item.order.submitted_at != origin.submitted_at
+                    or any(e.timestamp > self.observed_at for e in item.executions)):
+                raise ValueError('proposed external order differs from its declared origin')
+
+    @property
+    def can_apply(self) -> bool:
+        return False
+
+    @property
+    def reconciled(self) -> bool:
+        return False
+
+    @property
+    def eligible_for_capital(self) -> bool:
+        return False
+
+
+type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions | ResolveOrders | StageExternalInventory
