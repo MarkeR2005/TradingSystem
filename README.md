@@ -4,7 +4,7 @@
 > [архитектурный эскиз](docs/v2/architecture.md),
 > [согласованный план XP/TDD](docs/v2/development-plan.md),
 > [первое подключение демо QUIK — только чтение](docs/v2/quik-readonly-check.md),
-> [текущий шаг: план внешнего учёта QUIK](docs/v2/iteration-24.md).
+> [текущий шаг: принятие внешнего учёта QUIK](docs/v2/iteration-25.md).
 > Текст ниже описывает исходный прототип.
 
 ## 1. Идейная основа и цели

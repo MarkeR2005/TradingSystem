@@ -20,7 +20,7 @@ async def attach(runtime, journal, clock):
         session_id='psb-fixture', timezone_offset=timedelta(hours=3))
     runtime.add_gateway(gateway)
     context = await runtime.start_strategy(Quiet())
-    await gateway.recover()
+    await gateway.recover(runtime.orders)
     await runtime.drain()
     return gateway, context
 
