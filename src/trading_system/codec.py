@@ -24,8 +24,10 @@ from .admission import (
     AccountLimit, CapitalPolicy, ConfigureCapital, RouteGrant, RouteValuation, StrategyLimit,
 )
 from .rebalance import AllocationLeg, CapitalSnapshot, CapitalTarget, ExternalCapital, RebalanceCapital
+from .reconciliation import QuikReconciliationCheckpoint
 
 _TYPES = {cls.__name__: cls for cls in (
+    QuikReconciliationCheckpoint,
     InventoryProvenance, ExternalPositionBasis, ExternalOrderOrigin, StageExternalInventory, AdoptExternalInventory,
     RepairExecutions, RepairOrderTarget,
     ResolveOrders, ResolvedOrderTarget,

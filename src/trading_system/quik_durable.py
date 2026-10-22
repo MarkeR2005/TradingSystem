@@ -14,17 +14,18 @@ from hashlib import sha256
 from typing import Any
 
 from . import codec
-from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
+from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, GatewayRejected, Message, OrderStatus, utc
 from .events import EventBus
 from .orders import OrderManager, gateway_recipient
 from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders, StageExternalInventory, AdoptExternalInventory
 from .persistence import DurableJournal, JournalError, canonical
 from .quik_contract import QuikOrder, QuikRoute, QuikTrade, integer
 from .quik_replay import QuikReplayGateway, QuikTransaction, _Order
-from .quik_compare import BrokerLink, ComparisonPolicy, QuikBindings
+from .quik_compare import BrokerLink, ComparisonPolicy, QuikBindings, compare_quik
 from .quik_repair import ExecutionEvidence, missing_suffix
 from .quik_outcomes import OrderEvidence, select_order_outcomes
 from .quik_inventory import build_external_inventory_plan
+from .reconciliation import QuikReconciliationCheckpoint, ReconciliationStatus
 from .state import json_object
 from .time import Clock, ManualClock
 
@@ -44,6 +45,7 @@ class _Protocol(QuikReplayGateway):
         self.outputs: list[Message] = []
         self.outcomes: list[OrderOutcome] = []
         self.inventory_adoptions: dict[str, AdoptExternalInventory] = {}
+        self.checkpoints: dict[str, QuikReconciliationCheckpoint] = {}
 
     async def _publish(self, message: Message) -> None:
         self.outputs.append(message)
@@ -138,10 +140,18 @@ class _Protocol(QuikReplayGateway):
         op = payload.get('op')
         shapes = {'command': {'op', 'message'}, 'callback': {'op', 'event', 'data'},
                   'response': {'op', 'transaction_id', 'data'}, 'deadlines': {'op'},
-                  'restart': {'op'}, 'fault': {'op', 'reason'}, 'inventory': {'op', 'command'}}
+                  'restart': {'op'}, 'fault': {'op', 'reason'}, 'inventory': {'op', 'command'},
+                  'checkpoint': {'op', 'checkpoint'}}
         if not isinstance(op, str) or op not in shapes or set(payload) != shapes[op]:
             raise JournalError('unknown QUIK input schema')
-        if op == 'inventory':
+        if op == 'checkpoint':
+            checkpoint = codec.decode(payload['checkpoint'])
+            if not isinstance(checkpoint, QuikReconciliationCheckpoint):
+                raise JournalError('invalid reconciliation checkpoint')
+            if checkpoint.operation_id in self.checkpoints:
+                raise JournalError('duplicate checkpoint journal input')
+            self.checkpoints[checkpoint.operation_id] = checkpoint
+        elif op == 'inventory':
             adoption = codec.decode(payload['command'])
             if not isinstance(adoption, AdoptExternalInventory):
                 raise JournalError('invalid inventory adoption input')
@@ -246,6 +256,18 @@ class QuikDurableGateway:
         self._tail += 1
 
     async def _evaluate(self, payload: dict[str, Any], at: datetime, number: int) -> tuple[_Protocol, dict[str, Any]]:
+        if payload.get('op') == 'checkpoint':
+            checkpoint = codec.decode(payload.get('checkpoint'))
+            if (not isinstance(checkpoint, QuikReconciliationCheckpoint)
+                    or checkpoint.source_revision != number - 1
+                    or (checkpoint.gateway_id, checkpoint.session_id) != (self.gateway_id, self._engine.session_id)
+                    or checkpoint.adoption_id not in self._engine.inventory_adoptions
+                    or self._post_inventory_errors(number - 1)
+                    or not checkpoint.created_at <= at <= checkpoint.expires_at
+                    or set(checkpoint.routes) != {s.route for s in self._engine.routes}
+                    or checkpoint.source_digest != self.order_evidence.digest
+                    or checkpoint.gateway_journal_digest != self._digest(self.journal.records[:1+2*(number-1)])):
+                raise JournalError('checkpoint differs from its committed gateway source')
         candidate = self._engine.fork(at)
         error: str | None = None
         try:
@@ -378,6 +400,138 @@ class QuikDurableGateway:
     def inventory_adoptions(self) -> tuple[AdoptExternalInventory, ...]:
         return tuple(self._engine.inventory_adoptions.values())
 
+    @staticmethod
+    def _digest(value: object) -> str:
+        return sha256(canonical(value).encode()).hexdigest()
+
+    def _post_inventory_errors(self, revision: int) -> bool:
+        adopted = False
+        for record in self.journal.records[:1+2*revision]:
+            if record.get('kind') == 'input' and record['payload'].get('op') == 'inventory':
+                adopted = True
+            elif adopted and record.get('kind') == 'input' and record['payload'].get('op') == 'fault':
+                return True  # Includes inputs rejected before JSON/parser evaluation.
+            elif adopted and record.get('kind') == 'result' and record.get('error') is not None:
+                return True
+        return False
+
+    @property
+    def reconciliation_checkpoints(self) -> tuple[QuikReconciliationCheckpoint, ...]:
+        return tuple(self._engine.checkpoints.values())
+
+    def _check_reconciliation_storage(self, oms: OrderManager) -> None:
+        if self._bus is None or oms.bus is not self._bus:
+            raise ValueError('checkpoint requires the attached OMS event bus')
+        if (not self._started or self._failed or not self.journal.writable or self.journal.degraded
+                or self.journal.record_count != self._tail or self._tail != 1+2*self._number
+                or oms._failed_after_commit or oms.journal is None or not oms.journal.writable
+                or oms.journal.degraded
+                or sum(r.get('kind') != 'strategy' for r in oms.journal.records) != oms.revision):
+            raise JournalError('checkpoint requires healthy complete journals and delivery')
+
+    def reconciliation_checkpoint(self, operation_id: str, oms: OrderManager, raw: dict[str, Any],
+                                  policy: ComparisonPolicy) -> QuikReconciliationCheckpoint:
+        """Build a local receipt proposal; recording rechecks every input under both locks."""
+        self._check_reconciliation_storage(oms)
+        assert oms.journal is not None
+        if len(self.inventory_adoptions) != 1:
+            raise ValueError('checkpoint requires one completed inventory adoption')
+        adoption = self.inventory_adoptions[0]
+        if oms._inventory_operations.get(adoption.operation_id) != adoption:
+            raise JournalError('gateway and OMS inventory decisions differ')
+        if self.unmatched:
+            raise ValueError('resolve unmatched callbacks before a checkpoint')
+        if self._post_inventory_errors(self._number):
+            raise ValueError('resolve post-adoption protocol input errors before a checkpoint')
+        if (policy.gateway_id != self.gateway_id or policy.session_id != self._engine.session_id
+                or policy.timezone_offset != self._engine.timezone_offset
+                or {(s.route, s.price_step, s.commission_fields) for s in policy.routes}
+                != {(s.route, s.price_step, s.commission_fields) for s in self._engine.routes}):
+            raise ValueError('checkpoint must cover the complete callback contract')
+        evidence = self.order_evidence
+        view = oms.observe_gateway(self.gateway_id)
+        if {e.key: e for e in view.executions} != {e.key: e for e in evidence.executions.executions}:
+            raise ValueError('OMS executions differ from the committed gateway history')
+        rejected = {m.order_id: m for m in evidence.outcomes if isinstance(m, GatewayRejected)}
+        proven = tuple(o.order_id for o in view.orders if o.status is OrderStatus.REJECTED and o.filled_quantity == 0
+                       and o.order_id in rejected and o.rejection_reason == rejected[o.order_id].reason)
+        view = replace(view, local_rejections=tuple(dict.fromkeys(view.local_rejections + proven)))
+        now = utc(self.clock.now())
+        report = compare_quik(raw, policy, view, evidence.executions.bindings, now=now, current_revision=oms.revision)
+        if not report.consistent:
+            reasons = tuple(dict.fromkeys(report.observation.issues + tuple(d.code for d in report.differences)))
+            raise ValueError('checkpoint comparison failed: ' + ', '.join(reasons))
+        started = utc(datetime.fromisoformat(raw['started_at']))
+        if started < self._engine.clock.now():
+            raise ValueError('observation predates the latest committed gateway input')
+        # Hash every declared interpretation, including account/holding scope and freshness.
+        policy_data = dict(profile=policy.profile, quik_version=policy.quik_version, gateway_id=policy.gateway_id,
+            session_id=policy.session_id, trading_date=policy.trading_date.isoformat(),
+            timezone_microseconds=policy.timezone_offset // timedelta(microseconds=1),
+            max_age_microseconds=policy.max_age // timedelta(microseconds=1),
+            routes=[dict(firmid=s.firmid, route=codec.encode(s.route), holding_type=s.holding_type,
+                         price_step=str(s.price_step), commission_fields=s.commission_fields) for s in policy.routes])
+        return QuikReconciliationCheckpoint(operation_id, adoption.operation_id, self.gateway_id,
+            self._engine.session_id, oms.revision, oms.journal.record_count, self._digest(oms.journal.records),
+            self._number, self._digest(self.journal.records), evidence.digest, self._digest(raw),
+            self._digest(policy_data), utc(datetime.fromisoformat(raw['finished_at'])), now,
+            started + policy.max_age, tuple(s.route for s in policy.routes),
+            len(report.observation.orders), len(report.observation.trades))
+
+    async def record_reconciliation(self, checkpoint: QuikReconciliationCheckpoint, oms: OrderManager,
+                                    raw: dict[str, Any], policy: ComparisonPolicy) -> None:
+        """Save a comparison, never change financial state, reserves, or trading gates."""
+        if not isinstance(checkpoint, QuikReconciliationCheckpoint) or self._bus is None or oms.bus is not self._bus:
+            raise ValueError('checkpoint requires its typed proposal and attached OMS')
+        await self._bus.drain()
+        async with self._lock:
+            async with oms._transition_lock:
+                self._check_reconciliation_storage(oms)
+                saved = self._engine.checkpoints.get(checkpoint.operation_id)
+                if saved is not None:
+                    if saved != checkpoint:
+                        raise ValueError('conflicting reconciliation checkpoint identifier')
+                    assert oms.journal is not None
+                    if (oms.journal.record_count < checkpoint.oms_record_count
+                            or self._digest(oms.journal.records[:checkpoint.oms_record_count]) != checkpoint.oms_journal_digest):
+                        raise JournalError('checkpoint belongs to a different OMS journal')
+                    return  # A historical repeat never renews its validity.
+                rebuilt = self.reconciliation_checkpoint(checkpoint.operation_id, oms, raw, policy)
+                if (checkpoint.created_at > rebuilt.created_at
+                        or replace(rebuilt, created_at=checkpoint.created_at) != checkpoint):
+                    raise ValueError('reconciliation inputs changed; rebuild checkpoint')
+                # Persist the instant revalidated above. A ticking wall clock may
+                # cross expires_at between validation and the journal append.
+                await self._commit({'op': 'checkpoint', 'checkpoint': codec.encode(checkpoint)}, at=rebuilt.created_at)
+
+    def reconciliation_status(self, operation_id: str, oms: OrderManager) -> ReconciliationStatus:
+        """Re-evaluate local validity on every read; saved receipts carry no admission bit."""
+        checkpoint = self._engine.checkpoints[operation_id]
+        reasons = []
+        if self._bus is None or oms.bus is not self._bus:
+            reasons.append('oms_not_attached')
+        if self._failed or not self._started or oms._failed_after_commit:
+            reasons.append('delivery_unavailable')
+        if (not self.journal.writable or self.journal.degraded or oms.journal is None
+                or not oms.journal.writable or oms.journal.degraded):
+            reasons.append('storage_unavailable')
+        if (self._number != checkpoint.source_revision + 1 or self.journal.record_count != self._tail
+                or self._tail != 1+2*self._number):
+            reasons.append('gateway_changed')
+        if (oms.revision != checkpoint.oms_revision or oms.journal is None
+                or oms.journal.record_count != checkpoint.oms_record_count):
+            reasons.append('oms_changed')
+        if (self._digest(self.journal.records[:1+2*checkpoint.source_revision]) != checkpoint.gateway_journal_digest
+                or oms.journal is None
+                or self._digest(oms.journal.records[:checkpoint.oms_record_count]) != checkpoint.oms_journal_digest):
+            reasons.append('journal_mismatch')
+        clocks = (utc(self.clock.now()), utc(oms.clock.now()))
+        if any(now < checkpoint.created_at for now in clocks):
+            reasons.append('clock_regressed')
+        if any(now > checkpoint.expires_at for now in clocks):
+            reasons.append('expired')
+        return ReconciliationStatus(checkpoint, tuple(reasons))
+
     def inventory_adoption_command(self, operation_id: str, oms: OrderManager, review_id: str) -> AdoptExternalInventory:
         """Capture a command; application rechecks the journal prefix and both live revisions."""
         return AdoptExternalInventory(operation_id, oms.revision, oms.external_inventory_review(review_id),
@@ -489,6 +643,12 @@ class QuikDurableGateway:
                         or not oms.journal.writable or oms.journal.degraded or oms._failed_after_commit
                         or any(oms._inventory_operations.get(c.operation_id) != c for c in self.inventory_adoptions)):
                     raise JournalError('restore the matching OMS inventory decisions before gateway delivery')
+            if self.reconciliation_checkpoints:
+                if (oms is None or oms.journal is None or any(
+                        oms.journal.record_count < c.oms_record_count
+                        or self._digest(oms.journal.records[:c.oms_record_count]) != c.oms_journal_digest
+                        for c in self.reconciliation_checkpoints)):
+                    raise JournalError('restore the matching OMS checkpoint prefixes before gateway delivery')
             try:
                 if self._reopened:
                     await self._publish([GatewayUncertain(self.gateway_id, RECOVERY_REASON)])
@@ -499,9 +659,9 @@ class QuikDurableGateway:
                 await self._stop()
                 raise
 
-    async def _commit(self, payload: dict[str, Any], *, publish: bool = True) -> None:
+    async def _commit(self, payload: dict[str, Any], *, publish: bool = True, at: datetime | None = None) -> None:
         try:
-            at = utc(self.clock.now())
+            at = utc(self.clock.now() if at is None else at)
             if at < self._engine.clock.now():
                 raise JournalError('QUIK clock moved backwards')
             number = self._number + 1
