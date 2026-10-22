@@ -12,6 +12,7 @@ from .persistence import canonical
 from .quik_boundary import CallbackCursor
 from .quik_contract import COMMISSION_FIELDS, MAX_TRANSACTION_ID, decimal, identifier, integer, timestamp
 from .quik_limits import _account_identifier, _table
+from .reconciliation import BROKER_LIMITATIONS
 
 
 @dataclass(frozen=True)
@@ -162,8 +163,7 @@ class ComparisonReport:
     oms_revision: int
     gateway_revision: int
     differences: tuple[Difference, ...]
-    limitations: tuple[str, ...] = ('broker_atomicity_unverified', 'history_coverage_unverified',
-                                  'position_cost_basis_unverified', 'gateway_cutover_unverified')
+    limitations: tuple[str, ...] = BROKER_LIMITATIONS
 
     @property
     def consistent(self) -> bool:
