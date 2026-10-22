@@ -424,4 +424,25 @@ class StageExternalInventory:
         return False
 
 
-type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions | ResolveOrders | StageExternalInventory
+@dataclass(frozen=True)
+class AdoptExternalInventory:
+    """Book a reviewed baseline, then bind it in the gateway. Never a trading permit."""
+
+    operation_id: str
+    expected_revision: int
+    review: StageExternalInventory
+    gateway_record_count: int
+    gateway_journal_digest: str
+
+    def __post_init__(self) -> None:
+        _identity(self.operation_id, self.expected_revision)
+        if not isinstance(self.review, StageExternalInventory) or self.operation_id == self.review.operation_id:
+            raise ValueError('adoption requires a review and a separate operation identifier')
+        if (type(self.gateway_record_count) is not int
+                or self.gateway_record_count != 1 + 2*self.review.source_revision
+                or not isinstance(self.gateway_journal_digest, str)
+                or re.fullmatch('[0-9a-f]{64}', self.gateway_journal_digest) is None):
+            raise ValueError('adoption requires the exact committed gateway journal prefix')
+
+
+type InventoryCommand = InventoryReport | TransferPosition | CloseManual | RepairExecutions | ResolveOrders | StageExternalInventory | AdoptExternalInventory

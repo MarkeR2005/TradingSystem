@@ -10,16 +10,17 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta
+from hashlib import sha256
 from typing import Any
 
 from . import codec
 from .domain import Execution, GatewayCancel, GatewaySubmit, GatewayUncertain, Message, utc
 from .events import EventBus
 from .orders import OrderManager, gateway_recipient
-from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders, StageExternalInventory
+from .inventory import OUTCOME_TYPES, OrderOutcome, RepairExecutions, ResolveOrders, StageExternalInventory, AdoptExternalInventory
 from .persistence import DurableJournal, JournalError, canonical
-from .quik_contract import QuikOrder, QuikRoute, QuikTrade
-from .quik_replay import QuikReplayGateway, QuikTransaction
+from .quik_contract import QuikOrder, QuikRoute, QuikTrade, integer
+from .quik_replay import QuikReplayGateway, QuikTransaction, _Order
 from .quik_compare import BrokerLink, ComparisonPolicy, QuikBindings
 from .quik_repair import ExecutionEvidence, missing_suffix
 from .quik_outcomes import OrderEvidence, select_order_outcomes
@@ -42,6 +43,7 @@ class _Protocol(QuikReplayGateway):
                          max_unmatched=max_unmatched)
         self.outputs: list[Message] = []
         self.outcomes: list[OrderOutcome] = []
+        self.inventory_adoptions: dict[str, AdoptExternalInventory] = {}
 
     async def _publish(self, message: Message) -> None:
         self.outputs.append(message)
@@ -76,14 +78,75 @@ class _Protocol(QuikReplayGateway):
                       t.route, t.side, t.quantity, t.price, t.commission, t.timestamp)
             for t in self._trades.values()))
 
+    async def adopt_inventory(self, command: AdoptExternalInventory) -> None:
+        previous = self.inventory_adoptions.get(command.operation_id)
+        if previous is not None:
+            if previous != command:
+                raise ValueError('conflicting gateway inventory operation')
+            return
+        review = command.review
+        if (self.inventory_adoptions or review.gateway_id != self.gateway_id or review.session_id != self.session_id
+                or any(p.route not in {s.route for s in self.routes} for p in review.observed_positions)):
+            raise ValueError('gateway adoption requires its first inventory baseline in the configured scope')
+        incoming = {origin.broker_order_id for origin in review.order_origins}
+        if (any(number not in incoming for number in self._external)
+                or any(t.order_id not in incoming for t, _ in self._pending.values())):
+            raise ValueError('unmatched callback outside proposed inventory')
+        for origin, item in zip(review.order_origins, review.imports, strict=True):
+            order, number = item.order, origin.broker_order_id
+            if (number in self._by_broker or order.order_id in self._orders
+                    or order.order_id != f'{self.session_id}:external-order:{number}'):
+                raise ValueError('external broker or local order identity is already bound')
+            if order.intent.limit_price is None:
+                raise ValueError('gateway adoption requires a supported limit order')
+            spec = next(s for s in self.routes if s.route == order.intent.route)
+            spec.price(order.intent.limit_price)
+            filled = integer(order.filled_quantity, zero=True)
+            self._orders[order.order_id] = _Order(order, 0, self._deadline(), broker_id=number,
+                accepted=True, filled=filled, reported=filled,
+                final=filled if order.status.terminal else None, inventory_cutoff=review.observed_at, external=True)
+            self._by_broker[number] = order.order_id
+            for execution in item.executions:
+                prefix = self.session_id + ':'
+                if not execution.execution_id.startswith(prefix):
+                    raise ValueError('execution is outside the adopted session')
+                key = integer(execution.execution_id[len(prefix):])
+                if key in self._trades:
+                    raise ValueError('historical execution already bound')
+                trade = QuikTrade(key, number, execution.route, execution.side, integer(execution.quantity),
+                                  execution.price, execution.commission, execution.timestamp)
+                pending = self._pending.get(key)
+                if pending is not None and pending[0] != trade:
+                    raise ValueError('pending trade conflicts with historical inventory')
+                self._trades[key] = trade
+                self._pending.pop(key, None)
+        # OMS installs the same cutoff on every known order of this gateway.
+        for state in self._orders.values():
+            state.inventory_cutoff = review.observed_at
+        pending_trades = tuple(t for t, _ in self._pending.values())
+        self._pending.clear()
+        for trade in pending_trades:
+            await self._trade(trade)  # Only new, post-boundary trades may produce financial messages.
+        external = tuple(self._external.values())
+        self._external.clear()
+        for report in external:
+            await self._order(report)
+        self.inventory_adoptions[command.operation_id] = command
+        self._blocked = True  # Adoption never constitutes independent broker reconciliation.
+
     async def apply(self, payload: dict[str, Any]) -> None:
         op = payload.get('op')
         shapes = {'command': {'op', 'message'}, 'callback': {'op', 'event', 'data'},
                   'response': {'op', 'transaction_id', 'data'}, 'deadlines': {'op'},
-                  'restart': {'op'}, 'fault': {'op', 'reason'}}
+                  'restart': {'op'}, 'fault': {'op', 'reason'}, 'inventory': {'op', 'command'}}
         if not isinstance(op, str) or op not in shapes or set(payload) != shapes[op]:
             raise JournalError('unknown QUIK input schema')
-        if op == 'command':
+        if op == 'inventory':
+            adoption = codec.decode(payload['command'])
+            if not isinstance(adoption, AdoptExternalInventory):
+                raise JournalError('invalid inventory adoption input')
+            await self.adopt_inventory(adoption)
+        elif op == 'command':
             command = codec.decode(payload['message'])
             if not isinstance(command, (GatewaySubmit, GatewayCancel)):
                 raise JournalError('unexpected durable gateway command')
@@ -312,6 +375,70 @@ class QuikDurableGateway:
             await oms._apply_guarded_repair(command, verify_source)
 
     @property
+    def inventory_adoptions(self) -> tuple[AdoptExternalInventory, ...]:
+        return tuple(self._engine.inventory_adoptions.values())
+
+    def inventory_adoption_command(self, operation_id: str, oms: OrderManager, review_id: str) -> AdoptExternalInventory:
+        """Capture a command; application rechecks the journal prefix and both live revisions."""
+        return AdoptExternalInventory(operation_id, oms.revision, oms.external_inventory_review(review_id),
+            self.journal.record_count, sha256(canonical(self.journal.records).encode()).hexdigest())
+
+    async def adopt_external_inventory(self, command: AdoptExternalInventory, oms: OrderManager,
+                                       raw: dict[str, Any], policy: ComparisonPolicy) -> None:
+        """OMS decision first, gateway binding second; exact retry finishes an interrupted adoption."""
+        if not isinstance(command, AdoptExternalInventory) or self._bus is None or oms.bus is not self._bus:
+            raise ValueError('adoption requires its command and the attached OMS event bus')
+        await self._bus.drain()
+        async with self._lock:
+            async with oms._transition_lock:
+                if (oms._failed_after_commit or oms.journal is None or not oms.journal.writable or oms.journal.degraded
+                        or not self._started or self._failed or not self.journal.writable or self.journal.degraded
+                        or self.journal.record_count != self._tail):
+                    raise JournalError('inventory adoption requires healthy journals and delivery; restart first')
+                saved = oms._inventory_operations.get(command.operation_id)
+                bound = self._engine.inventory_adoptions.get(command.operation_id)
+                if (command.gateway_record_count > self.journal.record_count
+                        or sha256(canonical(self.journal.records[:command.gateway_record_count]).encode()).hexdigest()
+                        != command.gateway_journal_digest):
+                    raise JournalError('gateway journal does not contain the approved inventory source prefix')
+                if saved is not None and saved != command:
+                    raise ValueError('conflicting OMS inventory operation')
+                if bound is not None:
+                    if bound != command or saved != command:
+                        raise JournalError('gateway and OMS inventory decisions differ')
+                    return
+                review = command.review
+                if saved is None:
+                    if (command.expected_revision != oms.revision
+                            or oms.external_inventory_review(review.operation_id) != review):
+                        raise ValueError('inventory adoption view changed')
+                    if (policy.timezone_offset != self._engine.timezone_offset
+                            or {(s.route, s.price_step, s.commission_fields) for s in policy.routes}
+                            != {(s.route, s.price_step, s.commission_fields) for s in self._engine.routes}):
+                        raise ValueError('comparison and callback contracts differ')
+                    rebuilt = build_external_inventory_plan(review.operation_id, raw, policy,
+                        oms.observe_gateway(self.gateway_id), self.order_evidence, position_basis=review.position_basis,
+                        order_origins=review.order_origins, now=oms.clock.now(), current_revision=oms.revision)
+                    if replace(rebuilt, expected_revision=review.expected_revision, created_at=review.created_at) != review:
+                        raise ValueError('inventory evidence changed; rebuild and stage a fresh review')
+                candidate = self._engine.fork(utc(self.clock.now()))
+                await candidate.adopt_inventory(command)  # Validate gateway side before any financial commit.
+                if saved is None:
+                    try:
+                        await oms._transition(command)
+                    except BaseException:
+                        if oms._failed_after_commit or not oms.journal.writable:
+                            await self._stop()
+                        raise
+                try:
+                    if oms.journal.degraded or not oms.journal.writable:
+                        raise JournalError('OMS storage became unavailable after the inventory decision')
+                    await self._commit({'op': 'inventory', 'command': codec.encode(command)})
+                except BaseException:
+                    await self._stop()
+                    raise
+
+    @property
     def unmatched(self) -> tuple[QuikOrder | QuikTrade, ...]:
         return self._engine.unmatched
 
@@ -350,13 +477,18 @@ class QuikDurableGateway:
             await self._stop()
             raise RuntimeError('attach and recover the QUIK gateway before accepting input')
 
-    async def recover(self) -> None:
+    async def recover(self, oms: OrderManager | None = None) -> None:
         async with self._lock:
             if self._started:
                 await self._require_started()
                 return
             if self._failed or self._bus is None or not self.journal.writable:
                 raise JournalError('gateway must be healthy and attached before recovery')
+            if self.inventory_adoptions:
+                if (oms is None or oms.bus is not self._bus or oms.journal is None
+                        or not oms.journal.writable or oms.journal.degraded or oms._failed_after_commit
+                        or any(oms._inventory_operations.get(c.operation_id) != c for c in self.inventory_adoptions)):
+                    raise JournalError('restore the matching OMS inventory decisions before gateway delivery')
             try:
                 if self._reopened:
                     await self._publish([GatewayUncertain(self.gateway_id, RECOVERY_REASON)])

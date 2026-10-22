@@ -51,6 +51,8 @@ class _Order:
     final: int | None = None
     gap_deadline: datetime | None = None
     cancel: _Cancel | None = None
+    inventory_cutoff: datetime | None = None
+    external: bool = False
 
 
 class QuikReplayGateway:
@@ -267,7 +269,8 @@ class QuikReplayGateway:
     async def _order(self, report: QuikOrder) -> None:
         transaction = self._by_transaction.get(report.transaction_id)
         local_id = self._by_broker.get(report.order_id)
-        if transaction is not None and transaction.request_id is None:
+        external = local_id is not None and self._orders[local_id].external
+        if not external and transaction is not None and transaction.request_id is None:
             if local_id is not None and local_id != transaction.order_id:
                 raise ValueError('order transaction and broker identities disagree')
             local_id = transaction.order_id
@@ -323,6 +326,8 @@ class QuikReplayGateway:
         await self._apply_trade(self._orders[local_id], trade)
 
     async def _apply_trade(self, state: _Order, trade: QuikTrade) -> None:
+        if state.inventory_cutoff is not None and trade.timestamp <= state.inventory_cutoff:
+            raise ValueError('unknown execution at or before imported inventory boundary')
         intent = state.snapshot.intent
         total = state.filled + trade.quantity
         if (trade.route != intent.route or trade.side != intent.side or not intent.accepts_price(trade.price)

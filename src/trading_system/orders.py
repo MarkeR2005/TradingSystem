@@ -20,7 +20,7 @@ from .rebalance import CapitalSnapshot, CapitalTarget, RebalanceCapital, allocat
 from .persistence import DurableJournal, JournalError
 from .ledger import PositionLedger
 from .inventory import MANUAL, CloseManual, InventoryCommand, InventoryReport, OmsObservation, TransferPosition, RepairExecutions
-from .inventory import ResolveOrders, StageExternalInventory
+from .inventory import ResolveOrders, StageExternalInventory, AdoptExternalInventory
 from .lifecycle import decode_strategy_record
 from .time import Clock, ManualClock
 from .plan_execution import PlanBook
@@ -146,7 +146,7 @@ class OrderManager:
         self.ledger.adopt(candidate.ledger)
 
     async def handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
-        if isinstance(message, (RepairExecutions, ResolveOrders, StageExternalInventory)):
+        if isinstance(message, (RepairExecutions, ResolveOrders, StageExternalInventory, AdoptExternalInventory)):
             raise ValueError('recovery command requires the durable gateway evidence guard')
         async with self._transition_lock:
             await self._transition(message)
@@ -181,7 +181,7 @@ class OrderManager:
             raise JournalError('durable transition could not be delivered; restart and reconcile required')
         if self._plans.duplicate(message) or self._deficits.duplicate(message):
             return
-        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions, ResolveOrders, StageExternalInventory)):
+        if isinstance(message, (InventoryReport, TransferPosition, CloseManual, RepairExecutions, ResolveOrders, StageExternalInventory, AdoptExternalInventory)):
             previous = self._inventory_operations.get(message.operation_id)
             if previous is not None:
                 if previous != message:
@@ -312,6 +312,12 @@ class OrderManager:
             raise ValueError('operation is not an external inventory review')
         return review
 
+    def external_inventory_adoption(self, operation_id: str) -> AdoptExternalInventory:
+        command = self._inventory_operations[operation_id]
+        if not isinstance(command, AdoptExternalInventory):
+            raise ValueError('operation is not an external inventory adoption')
+        return command
+
     def observe_gateway(self, gateway_id: str) -> OmsObservation:
         """Copy immutable records without yielding on the owning event loop."""
         if gateway_id not in self.gateway_ids:
@@ -327,9 +333,9 @@ class OrderManager:
         self._capital_required = True
         self._capital_refreshed = False
 
-    async def _inventory_report(self, command: InventoryReport) -> None:
-        if command.gateway_id in self._inventory_pending:
-            raise ValueError('staged external inventory requires broker cutover adoption, not a legacy report')
+    async def _inventory_report(self, command: InventoryReport, *, complete: bool = True) -> None:
+        if complete and command.gateway_id in self._inventory_pending:
+            raise ValueError('external inventory requires full broker reconciliation, not a legacy report')
         if self._deficits.active() is not None and (command.openings or command.imports):
             raise ValueError('new inventory must wait until deficit recovery is acknowledged')
         if self._plans.active(MANUAL) and (command.openings or command.imports):
@@ -384,7 +390,8 @@ class OrderManager:
         for order in self._orders.values():
             if order.intent.route.instrument.id.gateway_id == gateway:
                 self._inventory_cutoffs[order.order_id] = command.as_of
-        self._unreconciled.discard(gateway)
+        if complete:
+            self._unreconciled.discard(gateway)
         if command.openings or command.imports:
             self._invalidate_allocation()
 
@@ -460,6 +467,28 @@ class OrderManager:
         return None
 
     async def _handle(self, message: Message | ConfigureCapital | RebalanceCapital | InventoryCommand) -> None:
+        if isinstance(message, AdoptExternalInventory):
+            review = message.review
+            if (message.expected_revision != self._revision
+                    or self.external_inventory_review(review.operation_id) != review
+                    or review.gateway_id in self._inventory_gateways):
+                raise ValueError('adoption requires the current staged first inventory baseline')
+            if not review.created_at <= self.clock.now() <= review.expires_at:
+                raise ValueError('inventory review expired before adoption')
+            view = self.observe_gateway(review.gateway_id)
+            owners = {o.strategy_id for o in view.orders} | {owner for owner, _ in view.positions} | {MANUAL}
+            if any(self._plans.active(owner) for owner in owners) or self._deficits.active() is not None:
+                raise ValueError('active protection, plans or deficit require separate inventory recovery')
+            report = InventoryReport(message.operation_id, self._revision, review.gateway_id, review.observed_at,
+                tuple(p.opening for p in review.position_basis), review.imports, review.observed_positions,
+                tuple(o for o in view.orders if o.order_id not in view.local_rejections)
+                + tuple(item.order for item in review.imports))
+            await self._inventory_report(report, complete=False)
+            self._inventory_operations[message.operation_id] = message
+            self._inventory_pending.add(review.gateway_id)
+            self._unreconciled.add(review.gateway_id)
+            self._invalidate_allocation()
+            return  # Import is not full broker reconciliation and does not advance plans.
         if isinstance(message, StageExternalInventory):
             if message.expected_revision != self._revision or message.gateway_id not in self.gateway_ids:
                 raise ValueError('inventory review scope or OMS revision changed')
